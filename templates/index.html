@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WeatherBet // Operations Center</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+
+<!-- Status Bar -->
+<div class="status-bar">
+    <div class="left">
+        <span class="brand">WeatherBet</span>
+        <span class="live-dot live" id="connection-dot"></span>
+        <span class="badge badge-live" id="connection-badge">LIVE</span>
+        <span class="text-muted" id="last-scan">—</span>
+    </div>
+    <div class="right">
+        <span>Scan interval: 60m</span>
+        <span id="bot-status">Bot: checking...</span>
+    </div>
+</div>
+
+<!-- KPI Strip -->
+<div class="kpi-strip" id="kpi-strip">
+    <div class="kpi-card">
+        <div class="kpi-label">Balance</div>
+        <div class="kpi-value" id="kpi-balance">${{ "%.2f"|format(data.kpi.balance) }}</div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Total P&L</div>
+        <div class="kpi-value {{ 'text-green' if data.kpi.pnl >= 0 else 'text-red' }}" id="kpi-pnl">
+            {{ "+" if data.kpi.pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.pnl) }}
+        </div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Open Positions</div>
+        <div class="kpi-value" id="kpi-open">{{ data.kpi.open_count }}</div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value" id="kpi-winrate">{{ "%.1f%%"|format(data.kpi.win_rate) if data.kpi.win_rate is not none else "—" }}</div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Peak Balance</div>
+        <div class="kpi-value" id="kpi-peak">${{ "%.2f"|format(data.kpi.peak_balance) }}</div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Drawdown</div>
+        <div class="kpi-value {{ 'text-red' if data.kpi.drawdown < 0 else 'text-muted' }}" id="kpi-drawdown">
+            {{ "%.1f"|format(data.kpi.drawdown) }}%
+        </div>
+    </div>
+</div>
+
+<!-- Main Grid -->
+<div class="main-grid">
+
+    <!-- LEFT: Map Panel (spans 2 rows) -->
+    <div class="panel panel-map">
+        <div class="panel-header">
+            <span>World Map</span>
+            <span class="count">{{ data.locations|length }} cities</span>
+        </div>
+        <div id="map"></div>
+        <div class="city-cards" id="city-cards">
+            {% for key, m in data.locations.items() %}
+            <div class="city-card" id="card-{{ key }}">
+                <div class="city-code">{{ key.upper()[:3] }}</div>
+                <div class="city-detail">{{ m.name }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- CENTER TOP: Balance Chart -->
+    <div class="panel">
+        <div class="panel-header">
+            <span>Balance History</span>
+        </div>
+        <div class="chart-container">
+            <canvas id="balance-chart"></canvas>
+        </div>
+    </div>
+
+    <!-- RIGHT: Forecasts + Calibration (spans 2 rows) -->
+    <div class="panel panel-right">
+        <div class="panel-header">
+            <span>Forecast Sources</span>
+        </div>
+        <div class="forecast-table">
+            <div class="forecast-header">
+                <span>City</span><span>ECMWF</span><span>HRRR</span><span>METAR</span><span>Best</span>
+            </div>
+            <div class="forecast-body" id="forecast-body">
+                {% for f in data.forecasts %}
+                <div class="forecast-row">
+                    <span style="font-weight:600;">{{ f.city.upper()[:3] }}</span>
+                    <span>{{ f.ecmwf if f.ecmwf is not none else "—" }}°</span>
+                    <span>{{ f.hrrr if f.hrrr is not none else "—" }}°</span>
+                    <span>{{ f.metar if f.metar is not none else "—" }}°</span>
+                    <span class="best">{{ f.best }}°{{ f.unit }}</span>
+                </div>
+                {% endfor %}
+                {% if not data.forecasts %}
+                <div class="empty-state">Waiting for first scan...</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="calibration-section">
+            <div class="panel-header">
+                <span>Calibration (σ)</span>
+            </div>
+            <div id="calibration-bars">
+                {% if data.calibration %}
+                    {% for key, val in data.calibration.items() %}
+                        {% if val.n >= 10 %}
+                        <div class="calibration-entry">
+                            <span class="label">{{ key }}</span>
+                            <div class="calibration-bar-track">
+                                <div class="calibration-bar-fill"
+                                     style="width: {{ [val.sigma / 4 * 100, 100] | min }}%;
+                                            background: {{ 'var(--accent-green)' if val.sigma < 1.5 else ('var(--accent-yellow)' if val.sigma < 2.5 else 'var(--accent-red)') }};">
+                                </div>
+                            </div>
+                            <span class="calibration-value {{ 'text-green' if val.sigma < 1.5 else ('text-yellow' if val.sigma < 2.5 else 'text-red') }}">
+                                σ={{ "%.1f"|format(val.sigma) }}
+                            </span>
+                        </div>
+                        {% endif %}
+                    {% endfor %}
+                {% else %}
+                <div class="empty-state" style="height:auto;padding:12px;">
+                    Calibration data not yet available — requires resolved markets
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- CENTER BOTTOM: Positions + Activity -->
+    <div class="panel" style="display:flex;flex-direction:column;">
+        <div class="panel-header">
+            <span>Open Positions</span>
+            <span class="count" id="positions-count">{{ data.open_positions|length }} active</span>
+        </div>
+        <div class="positions-table">
+            <div class="table-header">
+                <span>City</span><span>Bucket</span><span>Entry</span><span>EV</span><span>Kelly</span><span>P&L</span>
+            </div>
+            <div class="table-body" id="positions-body">
+                {% for p in data.open_positions %}
+                <div class="table-row">
+                    <span>{{ p.city.upper()[:3] }}</span>
+                    <span>{{ p.bucket_low }}-{{ p.bucket_high }}°{{ p.unit }}</span>
+                    <span>${{ "%.3f"|format(p.entry_price) }}</span>
+                    <span class="text-green">+{{ "%.2f"|format(p.ev) }}</span>
+                    <span>{{ "%.2f"|format(p.kelly) }}</span>
+                    <span class="{{ 'text-green' if p.pnl and p.pnl >= 0 else 'text-red' if p.pnl else 'text-muted' }}">
+                        {{ ("$%.2f"|format(p.pnl)) if p.pnl else "—" }}
+                    </span>
+                </div>
+                {% endfor %}
+                {% if not data.open_positions %}
+                <div class="empty-state">No open positions</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="panel-header" style="margin-top:8px;">
+            <span>Activity Feed</span>
+            <span class="count">Live</span>
+        </div>
+        <div class="activity-feed" id="activity-feed">
+            {% for ev in data.activity %}
+            <div class="activity-entry {{ ev.type }}">{{ ev.ts[:19] }} {{ ev.msg }}</div>
+            {% endfor %}
+            {% if not data.activity %}
+            <div class="activity-entry scan">Waiting for activity...</div>
+            {% endif %}
+        </div>
+    </div>
+
+</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+<!-- Pass server data to JS -->
+<script>
+    window.__DASHBOARD_DATA__ = {{ data | tojson }};
+</script>
+<script src="/static/dashboard.js"></script>
+
+</body>
+</html>
