@@ -144,66 +144,49 @@ def check_bot_status() -> dict:
 # =============================================================================
 
 
-def detect_changes(old_markets: dict, new_markets: dict) -> list:
-    """
-    Compare two market snapshots and generate activity events for:
-      - New BUY positions
-      - Closed / exited positions
-      - Significant forecast shifts
-    Returns a list of event dicts.
-    """
+def detect_changes(old_markets: dict, new_markets: dict) -> list[dict]:
+    """Compare market snapshots and generate activity feed events."""
     events = []
-    now_str = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
-    for stem, new_data in new_markets.items():
-        old_data = old_markets.get(stem, {})
-        city = new_data.get("city", stem)
-        city_name = new_data.get("city_name", city)
-        date = new_data.get("date", "")
+    for key, new_data in new_markets.items():
+        old_data = old_markets.get(key)
+        city = new_data.get("city_name", key)
 
-        # BUY: position appeared
+        if old_data is None:
+            events.append({"ts": now, "type": "scan", "msg": f"SCAN New market: {city} {new_data.get('date', '')}"})
+            continue
+
         old_pos = old_data.get("position")
         new_pos = new_data.get("position")
-        if new_pos and not old_pos:
+
+        # New position opened
+        if old_pos is None and new_pos is not None:
+            bucket = f"{new_pos.get('bucket_low')}-{new_pos.get('bucket_high')}{new_data.get('unit', '')}"
             events.append({
-                "ts": now_str,
-                "type": "BUY",
-                "city": city,
-                "city_name": city_name,
-                "date": date,
-                "detail": new_pos,
+                "ts": now, "type": "buy",
+                "msg": f"BUY {city} ${new_pos.get('cost', 0):.0f} @ {new_pos.get('entry_price', 0):.3f} bucket {bucket} (EV +{new_pos.get('ev', 0):.2f})"
             })
 
-        # EXIT: position resolved (pnl populated)
-        old_pnl = old_data.get("pnl")
-        new_pnl = new_data.get("pnl")
-        if new_pnl is not None and old_pnl is None:
-            direction = "WIN" if new_pnl > 0 else "LOSS"
+        # Position closed
+        if old_pos and new_pos and old_pos.get("status") == "open" and new_pos.get("status") == "closed":
+            reason = new_pos.get("close_reason", "unknown")
+            pnl = new_pos.get("pnl", 0) or 0
+            sign = "+" if pnl >= 0 else ""
             events.append({
-                "ts": now_str,
-                "type": f"EXIT_{direction}",
-                "city": city,
-                "city_name": city_name,
-                "date": date,
-                "pnl": new_pnl,
+                "ts": now, "type": "stop" if pnl < 0 else "resolved",
+                "msg": f"EXIT {city} {reason} @ {new_pos.get('exit_price', 0):.3f} ({sign}${pnl:.2f})"
             })
 
-        # FORECAST: best forecast changed significantly (>= 1 degree)
-        old_snaps = old_data.get("forecast_snapshots", [])
-        new_snaps = new_data.get("forecast_snapshots", [])
-        if old_snaps and new_snaps:
-            old_best = old_snaps[-1].get("best")
-            new_best = new_snaps[-1].get("best")
-            if old_best is not None and new_best is not None and abs(new_best - old_best) >= 1:
-                events.append({
-                    "ts": now_str,
-                    "type": "FORECAST",
-                    "city": city,
-                    "city_name": city_name,
-                    "date": date,
-                    "old_best": old_best,
-                    "new_best": new_best,
-                })
+        # New forecast snapshot
+        old_snaps = len(old_data.get("forecast_snapshots", []))
+        new_snaps = len(new_data.get("forecast_snapshots", []))
+        if new_snaps > old_snaps:
+            latest = new_data["forecast_snapshots"][-1]
+            events.append({
+                "ts": now, "type": "monitor",
+                "msg": f"FORECAST {city} {latest.get('best_source', '').upper()} {latest.get('best')}°"
+            })
 
     return events
 
