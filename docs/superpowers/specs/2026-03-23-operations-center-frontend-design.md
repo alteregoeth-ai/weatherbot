@@ -182,16 +182,16 @@ Column proportions: `1fr 1.5fr 1fr`
   - Market bucket, entry price, current market price
   - Position P&L, Kelly fraction, sigma used
 - **Bounds:** Auto-fit to show all 20 cities on load
-- **Coordinates:** From `LOCATIONS` dict in `bot_v2.py` (airport lat/lon)
+- **Coordinates:** Duplicated from the `LOCATIONS` dict in `bot_v2.py` into `dashboard.py` as a constant. The dashboard runs as a separate process and cannot import from the bot. If cities are added to the bot, the dashboard constant must be updated manually.
 - **Below map:** Scrollable grid of mini city cards (2 columns), each showing city code, forecast, bucket, price. Left border colored by position status.
 
 #### Balance Chart (Center Top)
 - Chart.js line chart
-- X-axis: time (from trade timestamps)
-- Y-axis: balance
+- X-axis: time, Y-axis: balance
 - Blue line (`#58a6ff`) with subtle fill
 - Horizontal reference lines at starting balance and current balance
 - Tooltip on hover showing exact balance and timestamp
+- **Data source note:** `state.json` only stores the current balance snapshot (no history array). The dashboard accumulates balance history in memory by recording each `state.json` change detected via file watching. On dashboard restart, history resets to a single point (current balance). This is acceptable — the chart grows over time as the dashboard runs. A future enhancement could persist history to a `data/balance_history.json` file, but this is out of scope for v1.
 
 #### Positions Table (Center Middle)
 - Sortable table columns: City, Bucket, Entry Price, EV, Kelly, P&L
@@ -224,6 +224,7 @@ Column proportions: `1fr 1.5fr 1fr`
 - Color intensity by sigma value: green (low σ = accurate), yellow (medium), red (high σ = uncertain)
 - Shows sample count (n) next to each bar
 - Only shows entries with `n >= 10`
+- **Graceful absence:** `calibration.json` is only created after the bot resolves enough markets (30+ per city/source). This file may not exist for days or weeks. When absent, the panel shows "Calibration data not yet available — requires resolved markets" as a normal state, not an error. The panel appears automatically once the file is created.
 
 ---
 
@@ -315,6 +316,8 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 jinja2>=3.1.0
 watchfiles>=0.20.0
+psutil>=5.9.0
 ```
 
-Existing dependency (`requests`) remains for the bot. No conflicts.
+- `psutil` is used for bot process status detection (PID lookup)
+- Existing dependency (`requests`) remains for the bot. No conflicts.
