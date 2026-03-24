@@ -27,8 +27,12 @@
 <!-- KPI Strip -->
 <div class="kpi-strip" id="kpi-strip">
     <div class="kpi-card">
-        <div class="kpi-label">Balance</div>
-        <div class="kpi-value" id="kpi-balance">${{ "%.2f"|format(data.kpi.balance) }}</div>
+        <div class="kpi-label">Starting Balance</div>
+        <div class="kpi-value" id="kpi-starting">${{ "%.2f"|format(data.kpi.starting_balance) }}</div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Open Positions Cost</div>
+        <div class="kpi-value text-yellow" id="kpi-open-cost">${{ "%.2f"|format(data.kpi.open_cost) }}</div>
     </div>
     <div class="kpi-card">
         <div class="kpi-label">Realized P&L</div>
@@ -37,28 +41,22 @@
         </div>
     </div>
     <div class="kpi-card">
+        <div class="kpi-label">Cash Available</div>
+        <div class="kpi-value" id="kpi-cash">${{ "%.2f"|format(data.kpi.cash) }}</div>
+    </div>
+    <div class="kpi-card">
         <div class="kpi-label">Unrealized P&L</div>
         <div class="kpi-value {{ 'text-green' if data.kpi.unrealized_pnl >= 0 else 'text-red' }}" id="kpi-unrealized">
             {{ "+" if data.kpi.unrealized_pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.unrealized_pnl) }}
         </div>
     </div>
     <div class="kpi-card">
-        <div class="kpi-label">Total P&L</div>
-        <div class="kpi-value {{ 'text-green' if data.kpi.total_pnl >= 0 else 'text-red' }}" id="kpi-total-pnl">
-            {{ "+" if data.kpi.total_pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.total_pnl) }}
-        </div>
-    </div>
-    <div class="kpi-card">
-        <div class="kpi-label">Open Positions</div>
+        <div class="kpi-label">Positions</div>
         <div class="kpi-value" id="kpi-open">{{ data.kpi.open_count }}</div>
     </div>
     <div class="kpi-card">
         <div class="kpi-label">Win Rate</div>
         <div class="kpi-value" id="kpi-winrate">{{ "%.1f%%"|format(data.kpi.win_rate) if data.kpi.win_rate is not none else "—" }}</div>
-    </div>
-    <div class="kpi-card">
-        <div class="kpi-label">Peak Balance</div>
-        <div class="kpi-value" id="kpi-peak">${{ "%.2f"|format(data.kpi.peak_balance) }}</div>
     </div>
     <div class="kpi-card">
         <div class="kpi-label">Drawdown</div>

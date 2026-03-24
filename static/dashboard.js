@@ -213,7 +213,9 @@
     // Update KPIs
     // =========================================================================
     function updateKPIs(kpi) {
-        document.getElementById("kpi-balance").textContent = "$" + kpi.balance.toFixed(2);
+        document.getElementById("kpi-starting").textContent = "$" + kpi.starting_balance.toFixed(2);
+        document.getElementById("kpi-open-cost").textContent = "$" + kpi.open_cost.toFixed(2);
+        document.getElementById("kpi-cash").textContent = "$" + kpi.cash.toFixed(2);
 
         function setPnl(id, value) {
             const el = document.getElementById(id);
@@ -222,11 +224,9 @@
         }
         setPnl("kpi-realized", kpi.realized_pnl);
         setPnl("kpi-unrealized", kpi.unrealized_pnl);
-        setPnl("kpi-total-pnl", kpi.total_pnl);
 
         document.getElementById("kpi-open").textContent = kpi.open_count;
         document.getElementById("kpi-winrate").textContent = kpi.win_rate !== null ? kpi.win_rate.toFixed(1) + "%" : "—";
-        document.getElementById("kpi-peak").textContent = "$" + kpi.peak_balance.toFixed(2);
 
         const ddEl = document.getElementById("kpi-drawdown");
         ddEl.textContent = kpi.drawdown.toFixed(1) + "%";

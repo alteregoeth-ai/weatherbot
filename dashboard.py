@@ -307,22 +307,24 @@ def build_dashboard_data() -> dict:
 
     realized_pnl = round(sum(p["pnl"] for p in closed_positions), 2)
     unrealized_pnl = round(sum(p["pnl"] for p in open_positions), 2)
+    open_cost = round(sum(p.get("cost", 0) for p in open_positions), 2)
+    cash = round(starting + realized_pnl - open_cost, 2)
 
     # Track balance history
     now_str = datetime.now(timezone.utc).isoformat()
-    if not balance_history or balance_history[-1]["balance"] != real_balance:
-        balance_history.append({"ts": now_str, "balance": real_balance})
+    if not balance_history or balance_history[-1]["balance"] != cash:
+        balance_history.append({"ts": now_str, "balance": cash})
 
     return {
         "state": state,
         "kpi": {
-            "balance": round(real_balance, 2),
+            "starting_balance": starting,
+            "open_cost": open_cost,
             "realized_pnl": realized_pnl,
+            "cash": cash,
             "unrealized_pnl": unrealized_pnl,
-            "total_pnl": round(realized_pnl + unrealized_pnl, 2),
             "open_count": len(open_positions),
             "win_rate": round(win_rate, 1) if win_rate is not None else None,
-            "peak_balance": round(peak, 2),
             "drawdown": round(drawdown, 1),
         },
         "open_positions": open_positions,
