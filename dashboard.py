@@ -289,9 +289,9 @@ def build_dashboard_data() -> dict:
         "state": state,
         "kpi": {
             "balance": state.get("balance", 0),
-            "realized_pnl": round(pnl, 2),
+            "realized_pnl": round(sum(p["pnl"] for p in closed_positions), 2),
             "unrealized_pnl": round(sum(p["pnl"] for p in open_positions), 2),
-            "total_pnl": round(pnl + sum(p["pnl"] for p in open_positions), 2),
+            "total_pnl": round(sum(p["pnl"] for p in closed_positions) + sum(p["pnl"] for p in open_positions), 2),
             "open_count": len(open_positions),
             "win_rate": round(win_rate, 1) if win_rate is not None else None,
             "peak_balance": peak,
