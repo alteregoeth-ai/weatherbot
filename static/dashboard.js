@@ -215,9 +215,14 @@
     function updateKPIs(kpi) {
         document.getElementById("kpi-balance").textContent = "$" + kpi.balance.toFixed(2);
 
-        const pnlEl = document.getElementById("kpi-pnl");
-        pnlEl.textContent = (kpi.pnl >= 0 ? "+" : "") + "$" + kpi.pnl.toFixed(2);
-        pnlEl.className = "kpi-value " + (kpi.pnl >= 0 ? "text-green" : "text-red");
+        function setPnl(id, value) {
+            const el = document.getElementById(id);
+            el.textContent = (value >= 0 ? "+" : "") + "$" + value.toFixed(2);
+            el.className = "kpi-value " + (value >= 0 ? "text-green" : "text-red");
+        }
+        setPnl("kpi-realized", kpi.realized_pnl);
+        setPnl("kpi-unrealized", kpi.unrealized_pnl);
+        setPnl("kpi-total-pnl", kpi.total_pnl);
 
         document.getElementById("kpi-open").textContent = kpi.open_count;
         document.getElementById("kpi-winrate").textContent = kpi.win_rate !== null ? kpi.win_rate.toFixed(1) + "%" : "—";

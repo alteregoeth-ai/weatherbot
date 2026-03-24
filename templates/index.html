@@ -31,9 +31,21 @@
         <div class="kpi-value" id="kpi-balance">${{ "%.2f"|format(data.kpi.balance) }}</div>
     </div>
     <div class="kpi-card">
+        <div class="kpi-label">Realized P&L</div>
+        <div class="kpi-value {{ 'text-green' if data.kpi.realized_pnl >= 0 else 'text-red' }}" id="kpi-realized">
+            {{ "+" if data.kpi.realized_pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.realized_pnl) }}
+        </div>
+    </div>
+    <div class="kpi-card">
+        <div class="kpi-label">Unrealized P&L</div>
+        <div class="kpi-value {{ 'text-green' if data.kpi.unrealized_pnl >= 0 else 'text-red' }}" id="kpi-unrealized">
+            {{ "+" if data.kpi.unrealized_pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.unrealized_pnl) }}
+        </div>
+    </div>
+    <div class="kpi-card">
         <div class="kpi-label">Total P&L</div>
-        <div class="kpi-value {{ 'text-green' if data.kpi.pnl >= 0 else 'text-red' }}" id="kpi-pnl">
-            {{ "+" if data.kpi.pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.pnl) }}
+        <div class="kpi-value {{ 'text-green' if data.kpi.total_pnl >= 0 else 'text-red' }}" id="kpi-total-pnl">
+            {{ "+" if data.kpi.total_pnl >= 0 else "" }}${{ "%.2f"|format(data.kpi.total_pnl) }}
         </div>
     </div>
     <div class="kpi-card">
