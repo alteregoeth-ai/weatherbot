@@ -276,7 +276,8 @@ body {
 
 .history-header, .history-row {
     display: grid;
-    grid-template-columns: 70px 80px 110px 80px 60px;
+    grid-template-columns: 80px 90px 130px 1fr 70px;
+    gap: 8px;
     padding: 4px 8px;
     font-size: 10px;
     align-items: center;
@@ -308,6 +309,10 @@ body {
     text-transform: uppercase;
     font-weight: 600;
     letter-spacing: 0.3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: fit-content;
 }
 
 .reason-stop_loss { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); }
