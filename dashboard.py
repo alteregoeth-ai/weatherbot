@@ -273,28 +273,55 @@ def build_dashboard_data() -> dict:
     # Sort closed positions by closed_at descending (most recent first)
     closed_positions.sort(key=lambda x: x.get("closed_at") or "", reverse=True)
 
-    total_resolved = state.get("wins", 0) + state.get("losses", 0)
-    win_rate = (state["wins"] / total_resolved * 100) if total_resolved > 0 else None
-    pnl = state.get("balance", 0) - state.get("starting_balance", 0)
-    peak = state.get("peak_balance", 0)
-    drawdown = ((state.get("balance", 0) - peak) / peak * 100) if peak > 0 else 0
+    # Calculate real balance by replaying all trades from market files
+    starting = state.get("starting_balance", 1000.0)
+    all_costs = sum(p.get("cost", 0) for p in open_positions)  # open position costs
+    all_costs += sum(p.get("cost", 0) for p in closed_positions)  # closed position costs
+    returned = sum(p.get("cost", 0) + p.get("pnl", 0) for p in closed_positions)
+    real_balance = starting - all_costs + returned
+
+    # Replay events chronologically to find peak balance
+    events = []
+    for key, m in markets.items():
+        pos = m.get("position")
+        if not pos:
+            continue
+        events.append(("buy", pos.get("opened_at", ""), -pos.get("cost", 0)))
+        if pos.get("status") == "closed":
+            events.append(("close", pos.get("closed_at", ""), pos.get("cost", 0) + (pos.get("pnl", 0) or 0)))
+    events.sort(key=lambda x: x[1])
+    replay_balance = starting
+    peak = starting
+    for _, _, amount in events:
+        replay_balance += amount
+        if replay_balance > peak:
+            peak = replay_balance
+
+    drawdown = ((real_balance - peak) / peak * 100) if peak > 0 else 0
+
+    # Win rate from closed trades
+    wins = sum(1 for p in closed_positions if p.get("pnl", 0) > 0)
+    total_closed = len(closed_positions)
+    win_rate = (wins / total_closed * 100) if total_closed > 0 else None
+
+    realized_pnl = round(sum(p["pnl"] for p in closed_positions), 2)
+    unrealized_pnl = round(sum(p["pnl"] for p in open_positions), 2)
 
     # Track balance history
-    balance = state.get("balance", 0)
     now_str = datetime.now(timezone.utc).isoformat()
-    if not balance_history or balance_history[-1]["balance"] != balance:
-        balance_history.append({"ts": now_str, "balance": balance})
+    if not balance_history or balance_history[-1]["balance"] != real_balance:
+        balance_history.append({"ts": now_str, "balance": real_balance})
 
     return {
         "state": state,
         "kpi": {
-            "balance": state.get("balance", 0),
-            "realized_pnl": round(sum(p["pnl"] for p in closed_positions), 2),
-            "unrealized_pnl": round(sum(p["pnl"] for p in open_positions), 2),
-            "total_pnl": round(sum(p["pnl"] for p in closed_positions) + sum(p["pnl"] for p in open_positions), 2),
+            "balance": round(real_balance, 2),
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "total_pnl": round(realized_pnl + unrealized_pnl, 2),
             "open_count": len(open_positions),
             "win_rate": round(win_rate, 1) if win_rate is not None else None,
-            "peak_balance": peak,
+            "peak_balance": round(peak, 2),
             "drawdown": round(drawdown, 1),
         },
         "open_positions": open_positions,
