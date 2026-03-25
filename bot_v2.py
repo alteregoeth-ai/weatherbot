@@ -553,10 +553,15 @@ def scan_and_update():
                     entry = pos["entry_price"]
                     stop  = pos.get("stop_price", entry * 0.80)  # 20% stop by default
 
-                    # Trailing: if up 20%+ — move stop to breakeven
-                    if current_price >= entry * 1.20 and stop < entry:
-                        pos["stop_price"] = entry
-                        pos["trailing_activated"] = True
+                    # Progressive trailing stop
+                    if current_price >= entry * 1.20:
+                        if not pos.get("trailing_activated"):
+                            new_stop = entry  # first activation: breakeven
+                            pos["trailing_activated"] = True
+                        else:
+                            new_stop = round(current_price * 0.80, 4)  # 80% of current
+                        if new_stop > stop:
+                            pos["stop_price"] = new_stop
 
                     # Check stop
                     if current_price <= stop:
@@ -911,11 +916,16 @@ def monitor_positions():
         else:
             take_profit = 0.75        # 48h+: take profit at $0.75
 
-        # Trailing: if up 20%+ — move stop to breakeven
-        if current_price >= entry * 1.20 and stop < entry:
-            pos["stop_price"] = entry
-            pos["trailing_activated"] = True
-            print(f"  [TRAILING] {city_name} {mkt['date']} — stop moved to breakeven ${entry:.3f}")
+        # Progressive trailing stop
+        if current_price >= entry * 1.20:
+            if not pos.get("trailing_activated"):
+                new_stop = entry  # first activation: breakeven
+                pos["trailing_activated"] = True
+            else:
+                new_stop = round(current_price * 0.80, 4)  # 80% of current
+            if new_stop > stop:
+                pos["stop_price"] = new_stop
+                print(f"  [TRAILING] {city_name} {mkt['date']} — stop moved to ${new_stop:.3f}")
 
         # Check take-profit
         take_triggered = take_profit is not None and current_price >= take_profit
