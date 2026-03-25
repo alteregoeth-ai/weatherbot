@@ -407,6 +407,24 @@ def load_state():
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
+def calculate_balance_from_trades():
+    """Ground truth balance calculated from market files instead of incremental tracking."""
+    state = load_state()
+    starting = state.get("starting_balance", BALANCE)
+    markets = load_all_markets()
+
+    total_cost = 0
+    total_returned = 0
+    for m in markets:
+        pos = m.get("position")
+        if not pos:
+            continue
+        total_cost += pos.get("cost", 0)
+        if pos.get("status") == "closed":
+            total_returned += pos.get("cost", 0) + (pos.get("pnl", 0) or 0)
+
+    return round(starting - total_cost + total_returned, 2)
+
 # =============================================================================
 # CORE LOGIC
 # =============================================================================
@@ -744,7 +762,8 @@ def scan_and_update():
         save_market(mkt)
         time.sleep(0.3)
 
-    state["balance"]      = round(balance, 2)
+    balance = calculate_balance_from_trades()
+    state["balance"]      = balance
     state["peak_balance"] = max(state.get("peak_balance", balance), balance)
     save_state(state)
 
@@ -767,7 +786,7 @@ def print_status():
     open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
     resolved = [m for m in markets if m["status"] == "resolved" and m.get("pnl") is not None]
 
-    bal     = state["balance"]
+    bal     = calculate_balance_from_trades()
     start   = state["starting_balance"]
     ret_pct = (bal - start) / start * 100
     wins    = state["wins"]
@@ -953,7 +972,9 @@ def monitor_positions():
             save_market(mkt)
 
     if closed:
-        state["balance"] = round(balance, 2)
+        balance = calculate_balance_from_trades()
+        state["balance"] = balance
+        state["peak_balance"] = max(state.get("peak_balance", balance), balance)
         save_state(state)
 
     return closed
