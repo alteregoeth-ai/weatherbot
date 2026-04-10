@@ -628,6 +628,8 @@ def scan_and_update():
                             kelly = calc_kelly(p, ask)
                             size  = bet_size(kelly, balance)
                             if size >= 0.50:
+                                shares = round(size / ask, 2)
+                                actual_cost = round(shares * ask, 2)
                                 best_signal = {
                                     "market_id":    o["market_id"],
                                     "question":     o["question"],
@@ -636,8 +638,8 @@ def scan_and_update():
                                     "entry_price":  ask,
                                     "bid_at_entry": bid,
                                     "spread":       spread,
-                                    "shares":       round(size / ask, 2),
-                                    "cost":         size,
+                                    "shares":       shares,
+                                    "cost":         actual_cost,
                                     "p":            round(p, 4),
                                     "ev":           round(ev, 4),
                                     "kelly":        round(kelly, 4),
@@ -669,7 +671,10 @@ def scan_and_update():
                             best_signal["entry_price"]  = real_ask
                             best_signal["bid_at_entry"] = real_bid
                             best_signal["spread"]       = real_spread
-                            best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
+                            # Recalculate shares and actual cost with real ask price
+                            shares = round(best_signal["cost"] / real_ask, 2)
+                            best_signal["shares"]       = shares
+                            best_signal["cost"]         = round(shares * real_ask, 2)
                             best_signal["ev"]           = round(calc_ev(best_signal["p"], real_ask), 4)
                     except Exception as e:
                         print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
