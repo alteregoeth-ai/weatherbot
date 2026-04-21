@@ -17,6 +17,7 @@ import sys
 import json
 import math
 import time
+import os
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -25,8 +26,30 @@ from pathlib import Path
 # CONFIG
 # =============================================================================
 
-with open("config.json", encoding="utf-8") as f:
-    _cfg = json.load(f)
+def _load_config():
+    cfg = {}
+    config_path = Path("config.json")
+    local_path = Path("config.local.json")
+
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    if local_path.exists():
+        with open(local_path, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+
+    env_overrides = {
+        "vc_key": os.environ.get("VC_KEY", "").strip(),
+        "poly_api_key": os.environ.get("POLY_API_KEY", "").strip(),
+        "poly_secret": os.environ.get("POLY_SECRET", "").strip(),
+        "poly_passphrase": os.environ.get("POLY_PASSPHRASE", "").strip(),
+    }
+    for key, value in env_overrides.items():
+        if value:
+            cfg[key] = value
+    return cfg
+
+_cfg = _load_config()
 
 BALANCE          = _cfg.get("balance", 10000.0)
 MAX_BET          = _cfg.get("max_bet", 20.0)        # max bet per trade
@@ -40,6 +63,10 @@ MAX_SLIPPAGE     = _cfg.get("max_slippage", 0.03)  # max allowed ask-bid spread
 SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
+POLY_API_KEY     = _cfg.get("poly_api_key", "")
+POLY_SECRET      = _cfg.get("poly_secret", "")
+POLY_PASSPHRASE  = _cfg.get("poly_passphrase", "")
+TAKE_PROFIT_PCT  = _cfg.get("take_profit_pct", None)
 
 SIGMA_F = 2.0
 SIGMA_C = 1.2
@@ -98,13 +125,13 @@ def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def bucket_prob(forecast, t_low, t_high, sigma=None):
-    """For regular buckets — exact match. For edge buckets — normal distribution."""
     s = sigma or 2.0
+    f = float(forecast)
     if t_low == -999:
-        return norm_cdf((t_high - float(forecast)) / s)
+        return norm_cdf((t_high + 0.5 - f) / s)
     if t_high == 999:
-        return 1.0 - norm_cdf((t_low - float(forecast)) / s)
-    return 1.0 if in_bucket(forecast, t_low, t_high) else 0.0
+        return 1.0 - norm_cdf((t_low - 0.5 - f) / s)
+    return norm_cdf((t_high + 0.5 - f) / s) - norm_cdf((t_low - 0.5 - f) / s)
 
 def calc_ev(p, price):
     if price <= 0 or price >= 1: return 0.0
@@ -683,6 +710,10 @@ def scan_and_update():
                         print(f"  [BUY]  {loc['name']} {horizon} {date} | {bucket_label} | "
                               f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
                               f"${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})")
+                        log_trade_to_csv(
+                            "BUY", mkt["city"], bucket_label, best_signal["entry_price"],
+                            None, best_signal["cost"], None, None, balance, best_signal["forecast_src"]
+                        )
 
             # Market closed by time
             if hours < 0.5 and mkt["status"] == "open":
@@ -735,6 +766,12 @@ def scan_and_update():
         result = "WIN" if won else "LOSS"
         print(f"  [{result}] {mkt['city_name']} {mkt['date']} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
         resolved += 1
+
+        bucket_label = f"{pos['bucket_low']}-{pos['bucket_high']}{('F' if mkt['unit'] == 'F' else 'C')}"
+        log_trade_to_csv(
+            "SELL", mkt["city"], bucket_label, pos["entry_price"],
+            pos["exit_price"], pos["cost"], pnl, "resolved", balance, pos.get("forecast_src", "unknown")
+        )
 
         save_market(mkt)
         time.sleep(0.3)
@@ -853,6 +890,87 @@ def print_report():
 
     print(f"{'='*55}\n")
 
+def log_trade_to_csv(event, city, bucket, entry_price, exit_price, cost, pnl, close_reason, balance, forecast_src):
+    """Append a trade record to data/trades_log.csv"""
+    import csv
+    from pathlib import Path
+    log_file = Path("data") / "trades_log.csv"
+    ts = datetime.now(timezone.utc).isoformat()
+
+    # Create CSV if it doesn't exist
+    if not log_file.exists():
+        with open(log_file, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "event", "city", "bucket", "entry_price", "exit_price", "cost", "pnl", "close_reason", "balance", "forecast_src"])
+
+    # Append trade
+    with open(log_file, "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([ts, event, city, bucket, entry_price, exit_price, cost, pnl, close_reason, balance, forecast_src])
+
+def print_extended_report():
+    """Extended performance metrics beyond the basic report."""
+    markets  = load_all_markets()
+    resolved = [m for m in markets if m["status"] == "resolved" and m.get("pnl") is not None]
+    state    = load_state()
+
+    if not resolved:
+        return
+
+    total_pnl = sum(m["pnl"] for m in resolved)
+    wins = [m for m in resolved if m["resolved_outcome"] == "win"]
+
+    # Max drawdown
+    peak = state.get("peak_balance", state["starting_balance"])
+    curr = state["balance"]
+    drawdown = round(((peak - curr) / peak * 100) if peak > 0 else 0, 2)
+
+    # Average metrics
+    avg_pnl = round(total_pnl / len(resolved), 2) if resolved else 0
+
+    # Forecast accuracy — wins where forecast_temp was in the winning bucket
+    forecast_acc = 0
+    for w in wins:
+        pos = w.get("position", {})
+        if pos and "forecast_temp" in pos and "bucket_low" in pos and "bucket_high" in pos:
+            ft = pos["forecast_temp"]
+            if pos["bucket_low"] <= ft <= pos["bucket_high"]:
+                forecast_acc += 1
+    forecast_acc_pct = round(forecast_acc / len(wins) * 100, 1) if wins else 0
+
+    # PnL by close reason
+    by_reason = {}
+    for m in resolved:
+        reason = m.get("position", {}).get("close_reason", "unknown")
+        if reason not in by_reason:
+            by_reason[reason] = 0
+        by_reason[reason] += m["pnl"]
+
+    # PnL by forecast source
+    by_source = {}
+    for m in resolved:
+        src = m.get("position", {}).get("forecast_src", "unknown")
+        if src not in by_source:
+            by_source[src] = 0
+        by_source[src] += m["pnl"]
+
+    print(f"\n  EXTENDED METRICS")
+    print(f"  Max drawdown:        {drawdown:.1f}%")
+    print(f"  Avg PnL per trade:   {'+'if avg_pnl>=0 else ''}{avg_pnl:.2f}")
+    print(f"  Forecast accuracy:   {forecast_acc_pct:.0f}% ({forecast_acc}/{len(wins)} wins)")
+
+    if by_reason:
+        print(f"  PnL by close reason:")
+        for reason, pnl in sorted(by_reason.items()):
+            count = len([m for m in resolved if m.get("position", {}).get("close_reason") == reason])
+            print(f"    {reason:<12} {count:2} trades  PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+
+    if by_source:
+        print(f"  PnL by forecast source:")
+        for src, pnl in sorted(by_source.items()):
+            count = len([m for m in resolved if m.get("position", {}).get("forecast_src") == src])
+            print(f"    {src:<12} {count:2} trades  PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+
 # =============================================================================
 # MAIN LOOP
 # =============================================================================
@@ -903,13 +1021,21 @@ def monitor_positions():
         end_date = mkt.get("event_end_date", "")
         hours_left = hours_to_resolution(end_date) if end_date else 999.0
 
-        # Take-profit threshold based on hours to resolution
-        if hours_left < 24:
-            take_profit = None        # hold to resolution
-        elif hours_left < 48:
-            take_profit = 0.85        # 24-48h: take profit at $0.85
+        # Take-profit threshold: configurable percentage or hours-based
+        take_profit = None
+        if TAKE_PROFIT_PCT is not None:
+            # Percentage-based: close when gain % is reached
+            gain_pct = ((current_price - entry) / entry * 100) if entry > 0 else 0
+            if gain_pct >= TAKE_PROFIT_PCT:
+                take_profit = current_price  # trigger immediately
         else:
-            take_profit = 0.75        # 48h+: take profit at $0.75
+            # Hours-based (original logic)
+            if hours_left < 24:
+                take_profit = None        # hold to resolution
+            elif hours_left < 48:
+                take_profit = 0.85        # 24-48h: take profit at $0.85
+            else:
+                take_profit = 0.75        # 48h+: take profit at $0.75
 
         # Trailing: if up 20%+ — move stop to breakeven
         if current_price >= entry * 1.20 and stop < entry:
@@ -1010,6 +1136,86 @@ def run_loop():
             print(f"  Done. Bye!")
             break
 
+def close_all_positions():
+    """Close all open positions at current market price and realize gains."""
+    markets = load_all_markets()
+    open_pos = [m for m in markets if m.get('position') and m['position'].get('status') == 'open']
+
+    if not open_pos:
+        print("No open positions to close.")
+        return
+
+    state = load_state()
+    balance = state['balance']
+    total_realized_pnl = 0.0
+    closed_count = 0
+
+    print(f"\n{'='*55}")
+    print(f"  CLOSING ALL POSITIONS")
+    print(f"{'='*55}\n")
+
+    for mkt in open_pos:
+        pos = mkt['position']
+        market_id = pos.get('market_id')
+        city = mkt['city_name']
+        date = mkt['date']
+        unit_sym = 'F' if mkt['unit'] == 'F' else 'C'
+        bucket = f"{pos['bucket_low']}-{pos['bucket_high']}{unit_sym}"
+        entry = pos['entry_price']
+        shares = pos['shares']
+        cost = pos['cost']
+
+        # Fetch current bestBid (sell price)
+        try:
+            r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
+            current_price = float(r.json().get('bestBid', entry))
+        except Exception:
+            current_price = entry
+
+        # Calculate PnL
+        pnl = round((current_price - entry) * shares, 2)
+        balance += cost + pnl
+        total_realized_pnl += pnl
+
+        # Update position
+        pos['exit_price'] = round(current_price, 3)
+        pos['pnl'] = pnl
+        pos['close_reason'] = 'manual'
+        pos['closed_at'] = datetime.now(timezone.utc).isoformat()
+        pos['status'] = 'closed'
+
+        # Update market
+        mkt['status'] = 'resolved'
+        mkt['pnl'] = pnl
+        mkt['resolved_outcome'] = 'win' if pnl > 0 else 'loss'
+
+        # Update state wins/losses
+        if pnl > 0:
+            state['wins'] += 1
+        else:
+            state['losses'] += 1
+
+        # Log to CSV
+        log_trade_to_csv(
+            'SELL', mkt['city'], bucket, entry, current_price,
+            cost, pnl, 'manual', balance, pos.get('forecast_src', 'unknown')
+        )
+
+        # Save market
+        save_market(mkt)
+
+        pnl_str = f"{pnl:+.2f}"
+        print(f"  {city:<16} {date} | {bucket:<15} | ${entry:.3f} → ${current_price:.3f} | PnL: {pnl_str}")
+        closed_count += 1
+
+    # Update state and save
+    state['balance'] = round(balance, 2)
+    state['peak_balance'] = max(state.get('peak_balance', balance), balance)
+    save_state(state)
+
+    print(f"\n  Closed: {closed_count} | Realized PnL: {total_realized_pnl:+.2f} | New Balance: ${balance:,.2f}")
+    print(f"{'='*55}\n")
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -1024,5 +1230,8 @@ if __name__ == "__main__":
     elif cmd == "report":
         _cal = load_cal()
         print_report()
+        print_extended_report()
+    elif cmd == "close-all":
+        close_all_positions()
     else:
-        print("Usage: python weatherbet.py [run|status|report]")
+        print("Usage: python weatherbet.py [run|status|report|close-all]")

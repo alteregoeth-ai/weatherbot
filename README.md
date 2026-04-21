@@ -13,7 +13,7 @@ The foundation. Scans 6 US cities, fetches forecasts from NWS using airport stat
 
 No math, no complexity. Just the core logic — good for understanding how the system works.
 
-### `weatherbet.py` — Full Bot (current)
+### `bot_v2.py` — Full Bot (current)
 Everything in v1, plus:
 - **20 cities** across 4 continents (US, Europe, Asia, South America, Oceania)
 - **3 forecast sources** — ECMWF (global), HRRR/GFS (US, hourly), METAR (real-time observations)
@@ -68,33 +68,56 @@ cd weatherbot
 pip install requests
 ```
 
-Create `config.json` in the project folder:
+`config.json` is tracked with placeholders only. Keep real keys in `config.local.json` (ignored by git) or environment variables.
+
+`config.json`:
 ```json
 {
   "balance": 10000.0,
   "max_bet": 20.0,
-  "min_ev": 0.05,
+  "min_ev": 0.1,
   "max_price": 0.45,
-  "min_volume": 2000,
+  "min_volume": 500,
   "min_hours": 2.0,
   "max_hours": 72.0,
   "kelly_fraction": 0.25,
-  "max_slippage": 0.03,
   "scan_interval": 3600,
   "calibration_min": 30,
-  "vc_key": "YOUR_VISUAL_CROSSING_KEY"
+  "vc_key": "YOUR_KEY_HERE",
+  "max_slippage": 0.03,
+  "poly_api_key": "YOUR_POLY_API_KEY_HERE",
+  "poly_secret": "YOUR_POLY_SECRET_HERE",
+  "poly_passphrase": "YOUR_POLY_PASSPHRASE_HERE",
+  "take_profit_pct": null
 }
 ```
 
-Get a free Visual Crossing API key at visualcrossing.com — used to fetch actual temperatures after market resolution.
+`config.local.json` example:
+```json
+{
+  "vc_key": "REAL_VISUAL_CROSSING_KEY",
+  "poly_api_key": "REAL_POLY_API_KEY",
+  "poly_secret": "REAL_POLY_SECRET",
+  "poly_passphrase": "REAL_POLY_PASSPHRASE"
+}
+```
+
+Environment variables override both files:
+`VC_KEY`, `POLY_API_KEY`, `POLY_SECRET`, `POLY_PASSPHRASE`.
 
 ---
 
 ## Usage
 ```bash
-python weatherbet.py           # start the bot — scans every hour
-python weatherbet.py status    # balance and open positions
-python weatherbet.py report    # full breakdown of all resolved markets
+python bot_v2.py run        # start the bot — scans every hour
+python bot_v2.py status     # balance and open positions
+python bot_v2.py report     # report + extended metrics
+python bot_v2.py close-all  # manually close all open positions
+```
+
+Dashboard JSON export:
+```bash
+python export_simulation_json.py
 ```
 
 ---
@@ -125,3 +148,5 @@ This data is used for self-calibration — the bot learns forecast accuracy per 
 ## Disclaimer
 
 This is not financial advice. Prediction markets carry real risk. Run the simulation thoroughly before committing real capital.
+
+Never commit real API keys, secrets, passphrases, or private keys to git.

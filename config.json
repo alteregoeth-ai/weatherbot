@@ -10,5 +10,9 @@
   "scan_interval": 3600,
   "calibration_min": 30,
   "vc_key": "YOUR_KEY_HERE",
-  "max_slippage": 0.03
+  "max_slippage": 0.03,
+  "poly_api_key": "YOUR_POLY_API_KEY_HERE",
+  "poly_secret": "YOUR_POLY_SECRET_HERE",
+  "poly_passphrase": "YOUR_POLY_PASSPHRASE_HERE",
+  "take_profit_pct": null
 }
