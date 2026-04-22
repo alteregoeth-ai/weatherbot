@@ -13,7 +13,7 @@ The foundation. Scans 6 US cities, fetches forecasts from NWS using airport stat
 
 No math, no complexity. Just the core logic — good for understanding how the system works.
 
-### `weatherbet.py` — Full Bot (current)
+### `bot_v2.py` — Full Bot (current)
 Everything in v1, plus:
 - **20 cities** across 4 continents (US, Europe, Asia, South America, Oceania)
 - **3 forecast sources** — ECMWF (global), HRRR/GFS (US, hourly), METAR (real-time observations)
@@ -65,7 +65,16 @@ Every Polymarket weather market resolves on a specific airport station. NYC reso
 ```bash
 git clone https://github.com/alteregoeth-ai/weatherbot
 cd weatherbot
-pip install requests py-clob-client eth-account
+chmod +x run.sh
+```
+
+`run.sh` is the recommended entrypoint. It loads env vars from `vars.json`, uses `.venv/bin/python`, and auto-repairs/recreates `.venv` if the interpreter link is broken.
+
+If you want to prepare the venv manually:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install requests py-clob-client eth-account
 ```
 
 Create `config.json` in the project folder:
@@ -127,12 +136,48 @@ python3 load_live_env.py --check
 
 ## Usage
 ```bash
-python weatherbet.py preflight  # required before enabling live mode
-python weatherbet.py           # start the bot — scans every hour
-python weatherbet.py status    # balance and open positions
-python weatherbet.py report    # full breakdown of all resolved markets
-python weatherbet.py close-all # manual close attempt for all open positions
+./run.sh preflight   # required before enabling live mode
+./run.sh run         # start the bot — scans every hour
+./run.sh status      # balance and open positions
+./run.sh report      # full breakdown of all resolved markets
+./run.sh close-all   # manual close attempt for all open positions
 ```
+
+Direct execution is also possible:
+
+```bash
+.venv/bin/python bot_v2.py [run|status|report|preflight|close-all]
+```
+
+### Notifications
+
+`notify` integration is no longer required. Runtime events/errors are shown in console output and written to `bot.log` via the internal tee logger.
+
+---
+
+## Troubleshooting
+
+### `./run.sh: ... .venv/bin/python: No such file or directory`
+
+Cause: stale/broken `.venv` symlink (common after moving/copying the project between machines).
+
+Fix options:
+
+```bash
+# Recommended: let run.sh self-heal
+./run.sh status
+
+# Manual repair
+rm -rf .venv
+python3 -m venv .venv
+.venv/bin/pip install requests py-clob-client eth-account
+```
+
+### Preflight fails in live mode
+
+Most common causes are invalid wallet values:
+- `POLY_PRIVATE_KEY` must be valid hex private key.
+- `POLY_FUNDER` must be a `0x` + 40 hex chars address when proxy mode is enabled.
 
 ---
 

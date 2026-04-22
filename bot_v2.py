@@ -23,8 +23,6 @@ import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from notify import imessage, imessage_error
-
 
 # ------------------------- stdout/stderr tee to bot.log ----------------------
 # Writes every print (and stderr) both to the console and to a persistent log
@@ -1121,14 +1119,6 @@ def scan_and_update():
                             "BUY", mkt["city"], bucket_label, best_signal["entry_price"],
                             None, best_signal["cost"], None, None, balance, best_signal["forecast_src"]
                         )
-                        try:
-                            imessage(
-                                f"[OPEN] {loc['name']} {horizon} {date} | {bucket_label} "
-                                f"@ ${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} "
-                                f"| ${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})"
-                            )
-                        except Exception:
-                            pass
 
             # Market closed by time
             if hours < 0.5 and mkt["status"] == "open":
@@ -1187,13 +1177,6 @@ def scan_and_update():
             "SELL", mkt["city"], bucket_label, pos["entry_price"],
             pos["exit_price"], pos["cost"], pnl, "resolved", balance, pos.get("forecast_src", "unknown")
         )
-        try:
-            imessage(
-                f"[{result}] {mkt['city_name']} {mkt['date']} | {bucket_label} "
-                f"| PnL: {'+' if pnl >= 0 else ''}{pnl:.2f} | bal ${balance:,.2f}"
-            )
-        except Exception:
-            pass
 
         save_market(mkt)
         time.sleep(0.3)
@@ -1507,14 +1490,6 @@ def monitor_positions():
             pos["status"]       = "closed"
             closed += 1
             print(f"  [{reason}] {city_name} {mkt['date']} | entry ${entry:.3f} exit ${current_price:.3f} | {hours_left:.0f}h left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
-            try:
-                imessage(
-                    f"[{reason}] {city_name} {mkt['date']} "
-                    f"| entry ${entry:.3f} → ${current_price:.3f} "
-                    f"| PnL: {'+' if pnl >= 0 else ''}{pnl:.2f} | bal ${balance:,.2f}"
-                )
-            except Exception:
-                pass
             save_market(mkt)
 
     if closed:
@@ -1525,7 +1500,7 @@ def monitor_positions():
 
 
 def send_daily_summary_if_due():
-    """Send at most one iMessage daily-summary per calendar day.
+    """Update daily summary cursor at most once per calendar day.
 
     Uses state['last_summary_date'] as a cursor. On first run just stamps
     today and skips sending. On subsequent day rollovers, tallies SELL rows
@@ -1569,15 +1544,8 @@ def send_daily_summary_if_due():
     except Exception:
         pass
 
-    bal = state.get("balance", 0.0)
-    try:
-        imessage(
-            f"[DAILY {last}] trades: {trades} "
-            f"| P&L: {'+' if pnl_sum >= 0 else ''}{pnl_sum:.2f} "
-            f"| bal: ${bal:,.2f}"
-        )
-    except Exception:
-        pass
+    _ = trades
+    _ = pnl_sum
 
     state["last_summary_date"] = today
     try:
@@ -1789,12 +1757,10 @@ def run_loop():
                 break
             except requests.exceptions.ConnectionError:
                 print(f"  Connection lost — waiting 60 sec")
-                imessage_error("[ERROR] weatherbot: connection lost — retrying in 60s")
                 time.sleep(60)
                 continue
             except Exception as e:
                 print(f"  Error: {e} — waiting 60 sec")
-                imessage_error(f"[ERROR] weatherbot scan: {e}")
                 time.sleep(60)
                 continue
         else:
@@ -1807,7 +1773,6 @@ def run_loop():
                     print(f"  balance: ${state['balance']:,.2f}")
             except Exception as e:
                 print(f"  Monitor error: {e}")
-                imessage_error(f"[ERROR] weatherbot monitor: {e}")
 
         try:
             time.sleep(MONITOR_INTERVAL)
@@ -1911,14 +1876,6 @@ def close_all_positions():
 
     print(f"\n  Closed: {closed_count} | Realized PnL: {total_realized_pnl:+.2f} | New Balance: ${balance:,.2f}")
     print(f"{'='*55}\n")
-
-    try:
-        imessage(
-            f"[CLOSE-ALL] closed: {closed_count} "
-            f"| realized PnL: {total_realized_pnl:+.2f} | bal ${balance:,.2f}"
-        )
-    except Exception:
-        pass
 
 # =============================================================================
 # CLI
