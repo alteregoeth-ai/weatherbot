@@ -6,6 +6,19 @@ No SDK. No black box. Pure Python.
 
 ---
 
+## Setup
+
+Install dependencies (includes `requests` and `py-clob-client` for Polymarket CLOB):
+
+```bash
+cd /path/to/weatherbot
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+---
+
 ## Versions
 
 ### `bot_v1.py` — Base Bot
@@ -108,14 +121,22 @@ Environment variables used by the bot:
 - `POLY_SECRET`
 - `POLY_PASSPHRASE`
 
+If the integrated terminal closes with **exit code 1** right after `source ./scripts/load_live_env.sh`, that was almost always a **Keychain read failure** combined with strict `set -e` in older versions of the loader. The script is now safe to source: failed lookups leave variables empty and print hints instead of exiting your shell. Confirm readiness with:
+
+```bash
+source ./scripts/load_live_env.sh
+python weatherbet.py livecheck
+```
+
 ---
 
 ## Usage
 ```bash
-python weatherbet.py           # start the bot — scans every hour
+python weatherbet.py           # start the bot — scans every hour (or: python weatherbot.py / python bot_v2.py)
 python weatherbet.py status    # balance and open positions
 python weatherbet.py report    # full breakdown of all resolved markets
 python weatherbet.py wallet    # live on-chain wallet balances (Polygon)
+python weatherbet.py livecheck # verify live env + CLOB client without placing orders
 ```
 
 ---

@@ -21,6 +21,10 @@ import os
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderArgs, OrderType
+CLOB_BUY  = "BUY"
+CLOB_SELL = "SELL"
 
 # =============================================================================
 # CONFIG
@@ -45,7 +49,11 @@ VC_KEY           = _cfg.get("vc_key", "")
 # Live trading credentials are loaded from environment variables only.
 # Never hardcode these values in source/config files.
 PRIVATE_KEY      = os.getenv("PRIVATE_KEY", "")
-CHAIN_ID         = int(os.getenv("CHAIN_ID", "137"))
+CHAIN_ID_RAW     = os.getenv("CHAIN_ID", "137")
+try:
+    CHAIN_ID     = int(CHAIN_ID_RAW)
+except ValueError:
+    CHAIN_ID     = None
 SIGNATURE_TYPE   = os.getenv("SIGNATURE_TYPE", "proxy")
 PROXY_KEY        = os.getenv("PROXY_KEY", "")
 POLY_API_KEY     = os.getenv("POLY_API_KEY", "")
@@ -59,6 +67,22 @@ POLYGON_RPC_URLS = [
     ).split(",") if u.strip()
 ]
 WALLET_ADDRESS   = os.getenv("WALLET_ADDRESS", PROXY_KEY)
+LIVE_CONFIG_ERRORS = []
+if not PRIVATE_KEY:
+    LIVE_CONFIG_ERRORS.append("PRIVATE_KEY")
+if not POLY_API_KEY:
+    LIVE_CONFIG_ERRORS.append("POLY_API_KEY")
+if not POLY_SECRET:
+    LIVE_CONFIG_ERRORS.append("POLY_SECRET")
+if not POLY_PASSPHRASE:
+    LIVE_CONFIG_ERRORS.append("POLY_PASSPHRASE")
+if not WALLET_ADDRESS:
+    LIVE_CONFIG_ERRORS.append("PROXY_KEY or WALLET_ADDRESS")
+if CHAIN_ID != 137:
+    LIVE_CONFIG_ERRORS.append("CHAIN_ID must be 137")
+if SIGNATURE_TYPE.lower() != "proxy":
+    LIVE_CONFIG_ERRORS.append("SIGNATURE_TYPE must be proxy")
+LIVE_TRADING     = not LIVE_CONFIG_ERRORS
 
 SIGMA_F = 2.0
 SIGMA_C = 1.2
@@ -123,10 +147,192 @@ TEMPERATURE_PRODUCTS = {
 }
 DEFAULT_PRODUCT_KIND = "max"
 PRODUCT_KIND_LIST = ("max", "min")
+SCAN_TRACE = os.getenv("WEATHERBOT_SCAN_TRACE", "1").lower() in {"1", "true", "yes", "on"}
+FORECAST_ATTEMPTS = 2
+FORECAST_RETRY_SECONDS = 1
+CLOB_POST_ATTEMPTS = 3
+CLOB_POST_RETRY_SECONDS = 1
+GAMMA_GET_ATTEMPTS = 3
+GAMMA_GET_RETRY_SECONDS = 1
 
 TOKEN_MATIC = "0x0000000000000000000000000000000000001010"
 TOKEN_USDC_POS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 TOKEN_USDC_NATIVE = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+
+# =============================================================================
+# CLOB — LIVE ORDER PLACEMENT
+# =============================================================================
+
+_clob = None
+
+def require_live_trading_ready():
+    if LIVE_CONFIG_ERRORS:
+        missing = ", ".join(LIVE_CONFIG_ERRORS)
+        raise RuntimeError(f"Live trading is not ready: {missing}")
+
+def live_order_succeeded(resp):
+    if not isinstance(resp, dict):
+        return False
+    if resp.get("errorMsg"):
+        return False
+    if resp.get("success") is not True:
+        return False
+    return bool(resp.get("orderID") or resp.get("id"))
+
+def create_signed_order(clob, args):
+    if hasattr(clob, "create_order"):
+        return clob.create_order(args)
+    if hasattr(clob, "create_and_sign_order"):
+        return clob.create_and_sign_order(args)
+    raise AttributeError("ClobClient has no create_order/create_and_sign_order method")
+
+def create_signed_market_order(clob, args):
+    if hasattr(clob, "create_market_order"):
+        return clob.create_market_order(args)
+    return create_signed_order(clob, args)
+
+def is_transient_clob_exception(exc):
+    return getattr(exc, "status_code", None) is None and "Request exception" in str(exc)
+
+def is_fok_not_filled_exception(exc):
+    err = getattr(exc, "error_msg", None)
+    if isinstance(err, dict):
+        msg = str(err.get("error", ""))
+    else:
+        msg = str(exc)
+    msg = msg.lower()
+    return "couldn't be fully filled" in msg or "fully filled or killed" in msg
+
+def post_live_order(clob, signed, order_type, action):
+    last_exc = None
+    for attempt in range(1, CLOB_POST_ATTEMPTS + 1):
+        try:
+            return clob.post_order(signed, order_type)
+        except Exception as e:
+            last_exc = e
+            if not is_transient_clob_exception(e) or attempt == CLOB_POST_ATTEMPTS:
+                raise
+            print(f"  [LIVE WARN] {action} post request failed ({e}); retrying {attempt}/{CLOB_POST_ATTEMPTS - 1}")
+            time.sleep(CLOB_POST_RETRY_SECONDS * attempt)
+    raise last_exc
+
+def get_gamma_json(url, timeout=(5, 8), label="GAMMA"):
+    last_exc = None
+    for attempt in range(1, GAMMA_GET_ATTEMPTS + 1):
+        try:
+            return requests.get(url, timeout=timeout).json()
+        except Exception as e:
+            last_exc = e
+            if attempt == GAMMA_GET_ATTEMPTS:
+                raise
+            print(f"  [{label} WARN] request failed ({e}); retrying {attempt}/{GAMMA_GET_ATTEMPTS - 1}")
+            time.sleep(GAMMA_GET_RETRY_SECONDS * attempt)
+    raise last_exc
+
+def get_clob():
+    global _clob
+    require_live_trading_ready()
+    if _clob is None:
+        creds = ApiCreds(
+            api_key=POLY_API_KEY,
+            api_secret=POLY_SECRET,
+            api_passphrase=POLY_PASSPHRASE,
+        )
+        _clob = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=CHAIN_ID,
+            key=PRIVATE_KEY,
+            creds=creds,
+            signature_type=1,  # 1 = proxy wallet
+            funder=WALLET_ADDRESS,
+        )
+    return _clob
+
+def place_live_buy(token_id, price, size_usdc):
+    if not token_id:
+        print("  [LIVE ERR] No token_id — cannot place buy")
+        return False
+    try:
+        clob = get_clob()
+        limit_price = round(float(price), 4)
+        amount_usdc = round(float(size_usdc), 2)
+        args = MarketOrderArgs(
+            token_id=token_id,
+            amount=amount_usdc,
+            side=CLOB_BUY,
+            price=limit_price,
+            order_type=OrderType.FOK,
+        )
+        signed = create_signed_market_order(clob, args)
+        resp = post_live_order(clob, signed, OrderType.FOK, "Buy")
+        if not live_order_succeeded(resp):
+            print(f"  [LIVE ERR] Buy rejected: {resp}")
+            return False
+        print(f"  [LIVE] Buy placed — order {resp.get('orderID', '?')}")
+        return True
+    except Exception as e:
+        if is_fok_not_filled_exception(e):
+            print("  [LIVE SKIP] Buy not filled — FOK order was killed by available liquidity")
+            return False
+        print(f"  [LIVE ERR] Buy exception: {e}")
+        return False
+
+def place_live_sell(token_id, price, shares):
+    if not token_id:
+        print("  [LIVE ERR] No token_id — cannot place sell")
+        return False
+    try:
+        clob = get_clob()
+        args = OrderArgs(price=round(float(price), 4), size=round(float(shares), 4), side=CLOB_SELL, token_id=token_id)
+        signed = create_signed_order(clob, args)
+        resp = post_live_order(clob, signed, OrderType.FOK, "Sell")
+        if not live_order_succeeded(resp):
+            print(f"  [LIVE ERR] Sell rejected: {resp}")
+            return False
+        print(f"  [LIVE] Sell placed — order {resp.get('orderID', '?')}")
+        return True
+    except Exception as e:
+        if is_fok_not_filled_exception(e):
+            print("  [LIVE SKIP] Sell not filled — FOK order was killed by available liquidity")
+            return False
+        print(f"  [LIVE ERR] Sell exception: {e}")
+        return False
+
+
+def print_live_check():
+    print(f"\n{'='*55}")
+    print("  WEATHERBET — LIVE TRADING CHECK")
+    print(f"{'='*55}")
+    checks = {
+        "PRIVATE_KEY": bool(PRIVATE_KEY),
+        "CHAIN_ID": CHAIN_ID == 137,
+        "SIGNATURE_TYPE": SIGNATURE_TYPE.lower() == "proxy",
+        "PROXY_KEY or WALLET_ADDRESS": bool(WALLET_ADDRESS),
+        "POLY_API_KEY": bool(POLY_API_KEY),
+        "POLY_SECRET": bool(POLY_SECRET),
+        "POLY_PASSPHRASE": bool(POLY_PASSPHRASE),
+    }
+    for name, ok in checks.items():
+        print(f"  {name:<25} {'ok' if ok else 'missing/invalid'}")
+
+    print(f"  Mode:                    {'LIVE' if LIVE_TRADING else 'PAPER'}")
+    if LIVE_CONFIG_ERRORS:
+        print(f"  Live disabled:           {', '.join(LIVE_CONFIG_ERRORS)}")
+        print(f"{'='*55}\n")
+        return
+
+    try:
+        get_clob()
+        print("  CLOB client:             ok")
+    except Exception as e:
+        print(f"  CLOB client:             error: {e}")
+
+    print(f"{'='*55}\n")
+
+
+def _trace_scan(msg: str):
+    if SCAN_TRACE:
+        print(f"  {msg}")
 
 # =============================================================================
 # MATH
@@ -297,17 +503,22 @@ def get_ecmwf(city_slug, dates, product_kind=DEFAULT_PRODUCT_KIND):
         f"&forecast_days=7&timezone={TIMEZONES.get(city_slug, 'UTC')}"
         f"&models=ecmwf_ifs025&bias_correction=true"
     )
-    for attempt in range(3):
+    _trace_scan(f"[ECMWF] {city_slug}/{product_kind}: requesting {len(dates)}d forecast")
+    for attempt in range(FORECAST_ATTEMPTS):
         try:
+            started = time.time()
             data = requests.get(url, timeout=(5, 10)).json()
+            if SCAN_TRACE:
+                _trace_scan(f"[ECMWF] {city_slug}/{product_kind}: request ok in {time.time()-started:.2f}s (attempt {attempt+1})")
             if "error" not in data:
                 for date, temp in zip(data["daily"]["time"], data["daily"][variable]):
                     if date in dates and temp is not None:
                         result[date] = round(temp, 1) if unit == "C" else round(temp)
             break
         except Exception as e:
-            if attempt < 2:
-                time.sleep(3)
+            _trace_scan(f"[ECMWF] {city_slug}/{product_kind}: attempt {attempt+1} failed: {e}")
+            if attempt < FORECAST_ATTEMPTS - 1:
+                time.sleep(FORECAST_RETRY_SECONDS)
             else:
                 print(f"  [ECMWF] {city_slug}: {e}")
     return result
@@ -326,17 +537,22 @@ def get_hrrr(city_slug, dates, product_kind=DEFAULT_PRODUCT_KIND):
         f"&forecast_days=3&timezone={TIMEZONES.get(city_slug, 'UTC')}"
         f"&models=gfs_seamless"  # HRRR+GFS seamless — best option for US
     )
-    for attempt in range(3):
+    _trace_scan(f"[HRRR] {city_slug}/{product_kind}: requesting {len(dates)}d forecast")
+    for attempt in range(FORECAST_ATTEMPTS):
         try:
+            started = time.time()
             data = requests.get(url, timeout=(5, 10)).json()
+            if SCAN_TRACE:
+                _trace_scan(f"[HRRR] {city_slug}/{product_kind}: request ok in {time.time()-started:.2f}s (attempt {attempt+1})")
             if "error" not in data:
                 for date, temp in zip(data["daily"]["time"], data["daily"][variable]):
                     if date in dates and temp is not None:
                         result[date] = round(temp)
             break
         except Exception as e:
-            if attempt < 2:
-                time.sleep(3)
+            _trace_scan(f"[HRRR] {city_slug}/{product_kind}: attempt {attempt+1} failed: {e}")
+            if attempt < FORECAST_ATTEMPTS - 1:
+                time.sleep(FORECAST_RETRY_SECONDS)
             else:
                 print(f"  [HRRR] {city_slug}: {e}")
     return result
@@ -347,8 +563,12 @@ def get_metar(city_slug):
     station = loc["station"]
     unit = loc["unit"]
     try:
+        _trace_scan(f"[METAR] {city_slug}: requesting station {station}")
+        started = time.time()
         url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json"
         data = requests.get(url, timeout=(5, 8)).json()
+        if SCAN_TRACE:
+            _trace_scan(f"[METAR] {city_slug}: done in {time.time()-started:.2f}s")
         if data and isinstance(data, list):
             temp_c = data[0].get("temp")
             if temp_c is not None:
@@ -372,7 +592,11 @@ def get_actual_temp(city_slug, date_str, product_kind=DEFAULT_PRODUCT_KIND):
         f"?unitGroup={vc_unit}&key={VC_KEY}&include=days&elements={temp_element}"
     )
     try:
+        _trace_scan(f"[VC] {city_slug} {date_str}: requesting actual temp ({product_kind})")
+        started = time.time()
         data = requests.get(url, timeout=(5, 8)).json()
+        if SCAN_TRACE:
+            _trace_scan(f"[VC] {city_slug} {date_str}: done in {time.time()-started:.2f}s")
         days = data.get("days", [])
         if days and days[0].get(temp_element) is not None:
             return round(float(days[0][temp_element]), 1)
@@ -386,8 +610,15 @@ def check_market_resolved(market_id):
     Returns: None (still open), True (YES won), False (NO won)
     """
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(5, 8))
-        data = r.json()
+        _trace_scan(f"[RESOLVE] checking market {market_id}")
+        started = time.time()
+        data = get_gamma_json(
+            f"https://gamma-api.polymarket.com/markets/{market_id}",
+            timeout=(5, 8),
+            label=f"RESOLVE {market_id}",
+        )
+        if SCAN_TRACE:
+            _trace_scan(f"[RESOLVE] market {market_id}: response in {time.time()-started:.2f}s")
         closed = data.get("closed", False)
         if not closed:
             return None
@@ -411,8 +642,15 @@ def get_polymarket_event(city_slug, month, day, year, product_kind=DEFAULT_PRODU
     prefix = TEMPERATURE_PRODUCTS[product_kind]["slug_prefix"]
     slug = f"{prefix}-{city_slug}-on-{month}-{day}-{year}"
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=(5, 8))
-        data = r.json()
+        _trace_scan(f"[EVENT] {city_slug}/{product_kind} slug {slug}")
+        started = time.time()
+        data = get_gamma_json(
+            f"https://gamma-api.polymarket.com/events?slug={slug}",
+            timeout=(5, 8),
+            label=f"EVENT {city_slug}/{product_kind}",
+        )
+        if SCAN_TRACE:
+            _trace_scan(f"[EVENT] {city_slug}/{product_kind} done in {time.time()-started:.2f}s")
         if data and isinstance(data, list) and len(data) > 0:
             return data[0]
     except Exception:
@@ -421,8 +659,12 @@ def get_polymarket_event(city_slug, month, day, year, product_kind=DEFAULT_PRODU
 
 def get_market_price(market_id):
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
-        prices = json.loads(r.json().get("outcomePrices", "[0.5,0.5]"))
+        data = get_gamma_json(
+            f"https://gamma-api.polymarket.com/markets/{market_id}",
+            timeout=(3, 5),
+            label=f"PRICE {market_id}",
+        )
+        prices = json.loads(data.get("outcomePrices", "[0.5,0.5]"))
         return float(prices[0])
     except Exception:
         return None
@@ -583,10 +825,12 @@ def scan_and_update():
         unit = loc["unit"]
         unit_sym = "F" if unit == "F" else "C"
         print(f"  -> {loc['name']}...", end=" ", flush=True)
+        _trace_scan(f"{loc['name']} scan start")
 
         dates = [(now + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
 
         for product_kind in PRODUCT_KIND_LIST:
+            _trace_scan(f"[{loc['name']}] {product_kind}: forecast snapshot")
             try:
                 snapshots = take_forecast_snapshot(city_slug, dates, product_kind=product_kind)
                 time.sleep(0.3)
@@ -595,238 +839,274 @@ def scan_and_update():
                 continue
 
             for i, date in enumerate(dates):
-                dt    = datetime.strptime(date, "%Y-%m-%d")
-                event = get_polymarket_event(city_slug, MONTHS[dt.month - 1], dt.day, dt.year, product_kind=product_kind)
-                if not event:
-                    continue
-
-                end_date = event.get("endDate", "")
-                hours    = hours_to_resolution(end_date) if end_date else 0
-                horizon  = f"D+{i}"
-
-                # Load or create market record
-                mkt = load_market(city_slug, date, product_kind=product_kind)
-                if mkt is None or mkt.get("product_kind", DEFAULT_PRODUCT_KIND) != product_kind:
-                    if hours < MIN_HOURS or hours > MAX_HOURS:
+                try:
+                    dt    = datetime.strptime(date, "%Y-%m-%d")
+                    event = get_polymarket_event(city_slug, MONTHS[dt.month - 1], dt.day, dt.year, product_kind=product_kind)
+                    if not event:
+                        _trace_scan(f"[{loc['name']}] {product_kind} {date}: no event")
                         continue
-                    mkt = new_market(city_slug, date, event, hours, product_kind=product_kind)
 
-                # Skip if market already resolved
-                if mkt["status"] == "resolved":
-                    continue
+                    end_date = event.get("endDate", "")
+                    hours    = hours_to_resolution(end_date) if end_date else 0
+                    horizon  = f"D+{i}"
 
-                # Update outcomes list — prices taken directly from event
-                outcomes = []
-                for market in event.get("markets", []):
-                    question = market.get("question", "")
-                    mid      = str(market.get("id", ""))
-                    volume   = float(market.get("volume", 0))
-                    rng      = parse_temp_range(question)
-                    if not rng:
+                    # Load or create market record
+                    mkt = load_market(city_slug, date, product_kind=product_kind)
+                    if mkt is None or mkt.get("product_kind", DEFAULT_PRODUCT_KIND) != product_kind:
+                        if hours < MIN_HOURS or hours > MAX_HOURS:
+                            continue
+                        mkt = new_market(city_slug, date, event, hours, product_kind=product_kind)
+
+                    # Skip if market already resolved
+                    if mkt["status"] == "resolved":
                         continue
-                    try:
-                        prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
-                        bid = float(prices[0])
-                        ask = float(prices[1]) if len(prices) > 1 else bid
-                    except Exception:
-                        continue
-                    outcomes.append({
-                        "question":  question,
-                        "market_id": mid,
-                        "range":     rng,
-                        "bid":       round(bid, 4),
-                        "ask":       round(ask, 4),
-                        "price":     round(bid, 4),   # for compatibility
-                        "spread":    round(ask - bid, 4),
-                        "volume":    round(volume, 0),
-                    })
 
-                outcomes.sort(key=lambda x: x["range"][0])
-                mkt["all_outcomes"] = outcomes
+                    # Update outcomes list — prices taken directly from event
+                    outcomes = []
+                    for market in event.get("markets", []):
+                        question = market.get("question", "")
+                        mid      = str(market.get("id", ""))
+                        volume   = float(market.get("volume", 0))
+                        rng      = parse_temp_range(question)
+                        if not rng:
+                            continue
+                        try:
+                            prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                            bid = float(prices[0])
+                            ask = float(prices[1]) if len(prices) > 1 else bid
+                        except Exception:
+                            continue
+                        outcomes.append({
+                            "question":  question,
+                            "market_id": mid,
+                            "range":     rng,
+                            "bid":       round(bid, 4),
+                            "ask":       round(ask, 4),
+                            "price":     round(bid, 4),   # for compatibility
+                            "spread":    round(ask - bid, 4),
+                            "volume":    round(volume, 0),
+                        })
 
-                # Forecast snapshot
-                snap = snapshots.get(date, {})
-                forecast_snap = {
-                    "ts":           snap.get("ts"),
-                    "horizon":      horizon,
-                    "hours_left":   round(hours, 1),
-                    "ecmwf":        snap.get("ecmwf"),
-                    "hrrr":         snap.get("hrrr"),
-                    "metar":        snap.get("metar"),
-                    "best":         snap.get("best"),
-                    "best_source":  snap.get("best_source"),
-                    "product_kind": product_kind,
-                }
-                mkt["forecast_snapshots"].append(forecast_snap)
+                    outcomes.sort(key=lambda x: x["range"][0])
+                    mkt["all_outcomes"] = outcomes
 
-                # Market price snapshot
-                top = max(outcomes, key=lambda x: x["price"]) if outcomes else None
-                market_snap = {
-                    "ts":       snap.get("ts"),
-                    "top_bucket": f"{top['range'][0]}-{top['range'][1]}{unit_sym}" if top else None,
-                    "top_price":  top["price"] if top else None,
-                }
-                mkt["market_snapshots"].append(market_snap)
+                    # Forecast snapshot
+                    snap = snapshots.get(date, {})
+                    forecast_snap = {
+                        "ts":           snap.get("ts"),
+                        "horizon":      horizon,
+                        "hours_left":   round(hours, 1),
+                        "ecmwf":        snap.get("ecmwf"),
+                        "hrrr":         snap.get("hrrr"),
+                        "metar":        snap.get("metar"),
+                        "best":         snap.get("best"),
+                        "best_source":  snap.get("best_source"),
+                        "product_kind": product_kind,
+                    }
+                    mkt["forecast_snapshots"].append(forecast_snap)
 
-                forecast_temp = snap.get("best")
-                best_source   = snap.get("best_source")
+                    # Market price snapshot
+                    top = max(outcomes, key=lambda x: x["price"]) if outcomes else None
+                    market_snap = {
+                        "ts":       snap.get("ts"),
+                        "top_bucket": f"{top['range'][0]}-{top['range'][1]}{unit_sym}" if top else None,
+                        "top_price":  top["price"] if top else None,
+                    }
+                    mkt["market_snapshots"].append(market_snap)
 
-                # --- STOP-LOSS AND TRAILING STOP ---
-                if mkt.get("position") and mkt["position"].get("status") == "open":
-                    pos = mkt["position"]
-                    current_price = None
-                    for o in outcomes:
-                        if o["market_id"] == pos["market_id"]:
-                            current_price = o["price"]
-                            break
+                    forecast_temp = snap.get("best")
+                    best_source   = snap.get("best_source")
 
-                    if current_price is not None:
-                        current_price = o.get("bid", current_price)  # sell at bid
-                        entry = pos["entry_price"]
-                        stop  = pos.get("stop_price", entry * 0.80)  # 20% stop by default
-
-                        # Trailing: if up 20%+ — move stop to breakeven
-                        if current_price >= entry * 1.20 and stop < entry:
-                            pos["stop_price"] = entry
-                            pos["trailing_activated"] = True
-
-                        # Check stop
-                        if current_price <= stop:
-                            pnl = round((current_price - entry) * pos["shares"], 2)
-                            balance += pos["cost"] + pnl
-                            pos["closed_at"]    = snap.get("ts")
-                            pos["close_reason"] = "stop_loss" if current_price < entry else "trailing_stop"
-                            pos["exit_price"]   = current_price
-                            pos["pnl"]          = pnl
-                            pos["status"]       = "closed"
-                            closed += 1
-                            reason = "STOP" if current_price < entry else "TRAILING BE"
-                            print(f"  [{reason}] {loc['name']} [{product_kind}] {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
-
-                # --- CLOSE POSITION if forecast shifted 2+ degrees ---
-                if mkt.get("position") and forecast_temp is not None:
-                    pos = mkt["position"]
-                    old_bucket_low  = pos["bucket_low"]
-                    old_bucket_high = pos["bucket_high"]
-                    # 2-degree buffer — avoid closing on small forecast fluctuations
-                    buffer = 2.0 if unit == "F" else 1.0
-                    mid_bucket = (old_bucket_low + old_bucket_high) / 2 if old_bucket_low != -999 and old_bucket_high != 999 else forecast_temp
-                    forecast_far = abs(forecast_temp - mid_bucket) > (abs(mid_bucket - old_bucket_low) + buffer)
-                    if not in_bucket(forecast_temp, old_bucket_low, old_bucket_high) and forecast_far:
+                    # --- STOP-LOSS AND TRAILING STOP ---
+                    if mkt.get("position") and mkt["position"].get("status") == "open":
+                        pos = mkt["position"]
                         current_price = None
                         for o in outcomes:
                             if o["market_id"] == pos["market_id"]:
                                 current_price = o["price"]
                                 break
+
                         if current_price is not None:
-                            pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
-                            balance += pos["cost"] + pnl
-                            mkt["position"]["closed_at"]    = snap.get("ts")
-                            mkt["position"]["close_reason"] = "forecast_changed"
-                            mkt["position"]["exit_price"]   = current_price
-                            mkt["position"]["pnl"]          = pnl
-                            mkt["position"]["status"]       = "closed"
-                            closed += 1
-                            print(f"  [CLOSE] {loc['name']} [{product_kind}] {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                            current_price = o.get("bid", current_price)  # sell at bid
+                            entry = pos["entry_price"]
+                            stop  = pos.get("stop_price", entry * 0.80)  # 20% stop by default
 
-                # --- OPEN POSITION ---
-                if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
-                    sigma = get_sigma(city_slug, best_source or "ecmwf", product_kind=product_kind)
-                    best_signal = None
+                            # Trailing: if up 20%+ — move stop to breakeven
+                            if current_price >= entry * 1.20 and stop < entry:
+                                pos["stop_price"] = entry
+                                pos["trailing_activated"] = True
 
-                    # Find exactly ONE bucket that matches the forecast
-                    # If forecast doesn't fit any bucket cleanly — skip this market
-                    matched_bucket = None
-                    for o in outcomes:
-                        t_low, t_high = o["range"]
-                        if in_bucket(forecast_temp, t_low, t_high):
-                            matched_bucket = o
-                            break
+                            # Check stop
+                            if current_price <= stop:
+                                live_sell_ok = True
+                                if LIVE_TRADING:
+                                    live_sell_ok = place_live_sell(pos.get("token_id"), current_price, pos["shares"])
+                                if live_sell_ok:
+                                    pnl = round((current_price - entry) * pos["shares"], 2)
+                                    balance += pos["cost"] + pnl
+                                    pos["closed_at"]    = snap.get("ts")
+                                    pos["close_reason"] = "stop_loss" if current_price < entry else "trailing_stop"
+                                    pos["exit_price"]   = current_price
+                                    pos["pnl"]          = pnl
+                                    pos["status"]       = "closed"
+                                    closed += 1
+                                    reason = "STOP" if current_price < entry else "TRAILING BE"
+                                    print(f"  [{reason}] {loc['name']} [{product_kind}] {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                                else:
+                                    print(f"  [LIVE ERR] Stop close not recorded for {loc['name']} [{product_kind}] {date}")
 
-                    if matched_bucket:
-                        o = matched_bucket
-                        t_low, t_high = o["range"]
-                        volume = o["volume"]
-                        bid    = o.get("bid", o["price"])
-                        ask    = o.get("ask", o["price"])
-                        spread = o.get("spread", 0)
+                    # --- CLOSE POSITION if forecast shifted 2+ degrees ---
+                    if mkt.get("position") and forecast_temp is not None:
+                        pos = mkt["position"]
+                        old_bucket_low  = pos["bucket_low"]
+                        old_bucket_high = pos["bucket_high"]
+                        # 2-degree buffer — avoid closing on small forecast fluctuations
+                        buffer = 2.0 if unit == "F" else 1.0
+                        mid_bucket = (old_bucket_low + old_bucket_high) / 2 if old_bucket_low != -999 and old_bucket_high != 999 else forecast_temp
+                        forecast_far = abs(forecast_temp - mid_bucket) > (abs(mid_bucket - old_bucket_low) + buffer)
+                        if not in_bucket(forecast_temp, old_bucket_low, old_bucket_high) and forecast_far:
+                            current_price = None
+                            for o in outcomes:
+                                if o["market_id"] == pos["market_id"]:
+                                    current_price = o["price"]
+                                    break
+                            if current_price is not None:
+                                live_sell_ok = True
+                                if LIVE_TRADING:
+                                    live_sell_ok = place_live_sell(pos.get("token_id"), current_price, pos["shares"])
+                                if live_sell_ok:
+                                    pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+                                    balance += pos["cost"] + pnl
+                                    mkt["position"]["closed_at"]    = snap.get("ts")
+                                    mkt["position"]["close_reason"] = "forecast_changed"
+                                    mkt["position"]["exit_price"]   = current_price
+                                    mkt["position"]["pnl"]          = pnl
+                                    mkt["position"]["status"]       = "closed"
+                                    closed += 1
+                                    print(f"  [CLOSE] {loc['name']} [{product_kind}] {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                                else:
+                                    print(f"  [LIVE ERR] Forecast-change close not recorded for {loc['name']} [{product_kind}] {date}")
 
-                        # All filters — if any fails, skip this market entirely
-                        if volume >= MIN_VOLUME:
-                            p  = bucket_prob(forecast_temp, t_low, t_high, sigma)
-                            ev = calc_ev(p, ask)
-                            if ev >= MIN_EV:
-                                kelly = calc_kelly(p, ask)
-                                size  = bet_size(kelly, balance)
-                                if size >= 0.50:
-                                    best_signal = {
-                                        "market_id":    o["market_id"],
-                                        "question":     o["question"],
-                                        "bucket_low":   t_low,
-                                        "bucket_high":  t_high,
-                                        "entry_price":  ask,
-                                        "bid_at_entry": bid,
-                                        "spread":       spread,
-                                        "shares":       round(size / ask, 2),
-                                        "cost":         size,
-                                        "p":            round(p, 4),
-                                        "ev":           round(ev, 4),
-                                        "kelly":        round(kelly, 4),
-                                        "forecast_temp":forecast_temp,
-                                        "forecast_src": best_source,
-                                        "sigma":        sigma,
-                                        "forecast_product": product_kind,
-                                        "opened_at":    snap.get("ts"),
-                                        "status":       "open",
-                                        "pnl":          None,
-                                        "exit_price":   None,
-                                        "close_reason": None,
-                                        "closed_at":    None,
-                                    }
+                    # --- OPEN POSITION ---
+                    if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
+                        sigma = get_sigma(city_slug, best_source or "ecmwf", product_kind=product_kind)
+                        best_signal = None
 
-                    if best_signal:
-                        # Fetch real bestAsk from Polymarket API for accurate entry price
-                        skip_position = False
-                        try:
-                            r = requests.get(f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}", timeout=(3, 5))
-                            mdata = r.json()
-                            real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
-                            real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
-                            real_spread = round(real_ask - real_bid, 4)
-                            # Re-check slippage and price with real values
-                            if real_spread > MAX_SLIPPAGE or real_ask >= MAX_PRICE:
-                                print(f"  [SKIP] {loc['name']} [{product_kind}] {date} — real ask ${real_ask:.3f} spread ${real_spread:.3f}")
-                                skip_position = True
-                            else:
-                                best_signal["entry_price"]  = real_ask
-                                best_signal["bid_at_entry"] = real_bid
-                                best_signal["spread"]       = real_spread
-                                best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
-                                best_signal["ev"]           = round(calc_ev(best_signal["p"], real_ask), 4)
-                        except Exception as e:
-                            print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
+                        # Find exactly ONE bucket that matches the forecast
+                        # If forecast doesn't fit any bucket cleanly — skip this market
+                        matched_bucket = None
+                        for o in outcomes:
+                            t_low, t_high = o["range"]
+                            if in_bucket(forecast_temp, t_low, t_high):
+                                matched_bucket = o
+                                break
 
-                        if not skip_position and best_signal["entry_price"] < MAX_PRICE:
-                            balance -= best_signal["cost"]
-                            mkt["position"] = best_signal
-                            state["total_trades"] += 1
-                            new_pos += 1
-                            bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
-                            print(f"  [BUY]  {loc['name']} [{product_kind}] {horizon} {date} | {bucket_label} | "
-                                  f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
-                                  f"${best_signal['cost']:.2f} ({(best_signal['forecast_src'] or product_kind).upper()})")
+                        if matched_bucket:
+                            o = matched_bucket
+                            t_low, t_high = o["range"]
+                            volume = o["volume"]
+                            bid    = o.get("bid", o["price"])
+                            ask    = o.get("ask", o["price"])
+                            spread = o.get("spread", 0)
 
-                # Market closed by time
-                if hours < 0.5 and mkt["status"] == "open":
-                    mkt["status"] = "closed"
+                            # All filters — if any fails, skip this market entirely
+                            if volume >= MIN_VOLUME:
+                                p  = bucket_prob(forecast_temp, t_low, t_high, sigma)
+                                ev = calc_ev(p, ask)
+                                if ev >= MIN_EV:
+                                    kelly = calc_kelly(p, ask)
+                                    size  = bet_size(kelly, balance)
+                                    if size >= 0.50:
+                                        best_signal = {
+                                            "market_id":    o["market_id"],
+                                            "question":     o["question"],
+                                            "bucket_low":   t_low,
+                                            "bucket_high":  t_high,
+                                            "entry_price":  ask,
+                                            "bid_at_entry": bid,
+                                            "spread":       spread,
+                                            "shares":       round(size / ask, 2),
+                                            "cost":         size,
+                                            "p":            round(p, 4),
+                                            "ev":           round(ev, 4),
+                                            "kelly":        round(kelly, 4),
+                                            "forecast_temp":forecast_temp,
+                                            "forecast_src": best_source,
+                                            "sigma":        sigma,
+                                            "forecast_product": product_kind,
+                                            "opened_at":    snap.get("ts"),
+                                            "status":       "open",
+                                            "pnl":          None,
+                                            "exit_price":   None,
+                                            "close_reason": None,
+                                            "closed_at":    None,
+                                        }
 
-                save_market(mkt)
-                time.sleep(0.1)
+                        if best_signal:
+                            _trace_scan(f"[{loc['name']}] {product_kind} {date}: candidate bucket {best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}")
+                            # Fetch real bestAsk from Polymarket API for accurate entry price
+                            skip_position = False
+                            try:
+                                _trace_scan(f"[{loc['name']}] {product_kind} {date}: refreshing entry market {best_signal['market_id']}")
+                                mdata = get_gamma_json(
+                                    f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}",
+                                    timeout=(3, 5),
+                                    label=f"ENTRY {best_signal['market_id']}",
+                                )
+                                real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
+                                real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
+                                real_spread = round(real_ask - real_bid, 4)
+                                # Re-check slippage and price with real values
+                                if real_spread > MAX_SLIPPAGE or real_ask >= MAX_PRICE:
+                                    print(f"  [SKIP] {loc['name']} [{product_kind}] {date} — real ask ${real_ask:.3f} spread ${real_spread:.3f}")
+                                    skip_position = True
+                                else:
+                                    best_signal["entry_price"]  = real_ask
+                                    best_signal["bid_at_entry"] = real_bid
+                                    best_signal["spread"]       = real_spread
+                                    best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
+                                    best_signal["ev"]           = round(calc_ev(best_signal["p"], real_ask), 4)
+                                    clob_ids = json.loads(mdata.get("clobTokenIds", "[]"))
+                                    best_signal["token_id"] = clob_ids[0] if clob_ids else None
+                            except Exception as e:
+                                print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
 
+                            if not skip_position and best_signal["entry_price"] < MAX_PRICE:
+                                if LIVE_TRADING:
+                                    ok = place_live_buy(best_signal.get("token_id"), best_signal["entry_price"], best_signal["cost"])
+                                    if not ok:
+                                        print(f"  [LIVE ERR] Buy failed — skipping position")
+                                        skip_position = True
+                            if not skip_position and best_signal["entry_price"] < MAX_PRICE:
+                                balance -= best_signal["cost"]
+                                mkt["position"] = best_signal
+                                state["total_trades"] += 1
+                                new_pos += 1
+                                bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
+                                print(f"  [BUY]  {loc['name']} [{product_kind}] {horizon} {date} | {bucket_label} | "
+                                      f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
+                                      f"${best_signal['cost']:.2f} ({(best_signal['forecast_src'] or product_kind).upper()})")
+
+                    # Market closed by time
+                    if hours < 0.5 and mkt["status"] == "open":
+                        mkt["status"] = "closed"
+
+                    save_market(mkt)
+                    time.sleep(0.1)
+                except Exception as e:
+                    print(f"  [ERROR] {loc['name']} [{product_kind}] {date}: {e}")
+
+        _trace_scan(f"{loc['name']} scan complete")
         print("ok")
 
     # --- AUTO-RESOLUTION ---
-    for mkt in load_all_markets():
+    open_markets = [
+        mkt for mkt in load_all_markets()
+        if mkt["status"] != "resolved" and mkt.get("position") and mkt["position"].get("status") == "open"
+    ]
+    _trace_scan(f"[RESOLVE] {len(open_markets)} open market records")
+    for mkt in open_markets:
+        _trace_scan(f"[RESOLVE] {mkt.get('city_name')} {mkt['date']} start")
         if mkt["status"] == "resolved":
             continue
 
@@ -839,12 +1119,14 @@ def scan_and_update():
             continue
 
         # Check if market closed on Polymarket
+        _trace_scan(f"[RESOLVE] checking {market_id}")
         won = check_market_resolved(market_id)
         if won is None:
             continue  # market still open
 
         # Market closed — record result
         product_kind = mkt.get("product_kind", DEFAULT_PRODUCT_KIND)
+        _trace_scan(f"[RESOLVE] {mkt.get('city_name')} fetching actual temp ({product_kind})")
         actual_temp = get_actual_temp(mkt["city"], mkt["date"], product_kind=product_kind)
         price  = pos["entry_price"]
         size   = pos["cost"]
@@ -1028,8 +1310,11 @@ def monitor_positions():
         # Fetch real bestBid from Polymarket API — actual sell price
         current_price = None
         try:
-            r = requests.get(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=(3, 5))
-            mdata = r.json()
+            mdata = get_gamma_json(
+                f"https://gamma-api.polymarket.com/markets/{mid}",
+                timeout=(3, 5),
+                label=f"MONITOR {mid}",
+            )
             best_bid = mdata.get("bestBid")
             if best_bid is not None:
                 current_price = float(best_bid)
@@ -1074,18 +1359,27 @@ def monitor_positions():
         stop_triggered = current_price <= stop
 
         if take_triggered or stop_triggered:
+            live_sell_ok = True
+            if LIVE_TRADING:
+                live_sell_ok = place_live_sell(pos.get("token_id"), current_price, pos["shares"])
+            if not live_sell_ok:
+                print(f"  [LIVE ERR] Monitor close not recorded for {city_name} {mkt['date']}")
+                continue
+
+            if take_triggered:
+                reason = "TAKE"
+            elif current_price < entry:
+                reason = "STOP"
+            else:
+                reason = "TRAILING BE"
             pnl = round((current_price - entry) * pos["shares"], 2)
             balance += pos["cost"] + pnl
             pos["closed_at"]    = datetime.now(timezone.utc).isoformat()
-            if take_triggered:
-                pos["close_reason"] = "take_profit"
-                reason = "TAKE"
-            elif current_price < entry:
-                pos["close_reason"] = "stop_loss"
-                reason = "STOP"
-            else:
-                pos["close_reason"] = "trailing_stop"
-                reason = "TRAILING BE"
+            pos["close_reason"] = {
+                "TAKE": "take_profit",
+                "STOP": "stop_loss",
+                "TRAILING BE": "trailing_stop",
+            }[reason]
             pos["exit_price"]   = current_price
             pos["pnl"]          = pnl
             pos["status"]       = "closed"
@@ -1096,6 +1390,7 @@ def monitor_positions():
     if closed:
         state["balance"] = round(balance, 2)
         save_state(state)
+        print(f"  balance: ${state['balance']:,.2f}")
 
     return closed
 
@@ -1111,6 +1406,7 @@ def run_loop():
     print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
     print(f"  Scan:       {SCAN_INTERVAL//60} min | Monitor: {MONITOR_INTERVAL//60} min")
     print(f"  Sources:    ECMWF + HRRR(US) + METAR(D+0)")
+    print(f"  Mode:       {'LIVE' if LIVE_TRADING else 'PAPER'}")
     print(f"  Data:       {DATA_DIR.resolve()}")
     print(f"  Ctrl+C to stop\n")
 
@@ -1177,5 +1473,7 @@ if __name__ == "__main__":
         print_report()
     elif cmd == "wallet":
         print_wallet_balance()
+    elif cmd == "livecheck":
+        print_live_check()
     else:
-        print("Usage: python weatherbet.py [run|status|report|wallet]")
+        print("Usage: python weatherbet.py [run|status|report|wallet|livecheck]")
