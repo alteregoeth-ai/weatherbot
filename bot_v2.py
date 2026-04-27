@@ -18,6 +18,7 @@ import json
 import math
 import time
 import os
+import random
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -42,7 +43,14 @@ MIN_HOURS        = _cfg.get("min_hours", 2.0)
 MAX_HOURS        = _cfg.get("max_hours", 72.0)
 KELLY_FRACTION   = _cfg.get("kelly_fraction", 0.25)
 MAX_SLIPPAGE     = _cfg.get("max_slippage", 0.03)  # max allowed ask-bid spread
-SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
+MAX_TOTAL_EXPOSURE = _cfg.get("max_total_exposure", 10.0)  # max sum of open position costs
+SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # legacy fallback if min/max unset
+SCAN_INTERVAL_MIN = int(_cfg.get("scan_interval_min", SCAN_INTERVAL))
+SCAN_INTERVAL_MAX = int(_cfg.get("scan_interval_max", SCAN_INTERVAL))
+if SCAN_INTERVAL_MIN < 1:
+    SCAN_INTERVAL_MIN = 1
+if SCAN_INTERVAL_MAX < SCAN_INTERVAL_MIN:
+    SCAN_INTERVAL_MAX = SCAN_INTERVAL_MIN
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
 
@@ -93,6 +101,14 @@ STATE_FILE       = DATA_DIR / "state.json"
 MARKETS_DIR      = DATA_DIR / "markets"
 MARKETS_DIR.mkdir(exist_ok=True)
 CALIBRATION_FILE = DATA_DIR / "calibration.json"
+SIGMA_CAL_FILE   = DATA_DIR / "sigma_calibration.json"
+
+_sigma_cal: dict = {}
+try:
+    with open(SIGMA_CAL_FILE) as _f:
+        _sigma_cal = json.load(_f)
+except FileNotFoundError:
+    pass
 
 LOCATIONS = {
     "nyc":          {"lat": 40.7772,  "lon":  -73.8726, "name": "New York City", "station": "KLGA", "unit": "F", "region": "us"},
@@ -147,7 +163,7 @@ TEMPERATURE_PRODUCTS = {
 }
 DEFAULT_PRODUCT_KIND = "max"
 PRODUCT_KIND_LIST = ("max", "min")
-SCAN_TRACE = os.getenv("WEATHERBOT_SCAN_TRACE", "1").lower() in {"1", "true", "yes", "on"}
+SCAN_TRACE = os.getenv("WEATHERBOT_SCAN_TRACE", "0").lower() in {"1", "true", "yes", "on"}
 FORECAST_ATTEMPTS = 2
 FORECAST_RETRY_SECONDS = 1
 CLOB_POST_ATTEMPTS = 3
@@ -265,6 +281,22 @@ def parse_balance_from_error(exc):
     m = re.search(r"balance:\s*(\d+)", msg)
     return int(m.group(1)) if m else None
 
+def extract_sell_fill_price(resp, limit_price):
+    """Compute actual SELL fill price from CLOB response.
+ 
+    For a SELL: makingAmount = shares sold, takingAmount = USDC received
+    (both in raw 1e6 units). fill_price = takingAmount / makingAmount.
+    Falls back to limit_price if fields missing or unparseable.
+    """
+    try:
+        making = float(resp.get("makingAmount", 0) or 0)
+        taking = float(resp.get("takingAmount", 0) or 0)
+        if making > 0 and taking > 0:
+            return round(taking / making, 4)
+    except Exception:
+        pass
+    return round(float(limit_price), 4)
+
 def place_live_buy(token_id, price, size_usdc):
     """Returns False on failure, or actual on-chain shares (float) on success."""
     if not token_id:
@@ -309,6 +341,7 @@ def place_live_sell(token_id, price, shares):
     if not token_id:
         print("  [LIVE ERR] No token_id — cannot place sell")
         return False
+    price = max(float(price), 0.001)
     try:
         clob = get_clob()
         sold_shares = float(shares)
@@ -324,8 +357,9 @@ def place_live_sell(token_id, price, shares):
         if not live_order_succeeded(resp):
             print(f"  [LIVE ERR] Sell rejected: {resp}")
             return False
-        print(f"  [LIVE] Sell placed — order {resp.get('orderID', '?')} | sold {sold_shares} shares @ ${price:.3f}")
-        return (sold_shares, float(price))
+        fill_price = extract_sell_fill_price(resp, price)
+        print(f"  [LIVE] Sell placed — order {resp.get('orderID', '?')} | sold {sold_shares} shares @ ${fill_price:.3f} (limit ${float(price):.3f})")
+        return (sold_shares, fill_price)
     except Exception as e:
         if is_fok_not_filled_exception(e):
             print("  [LIVE SKIP] Sell not filled — FOK order was killed by available liquidity")
@@ -377,13 +411,20 @@ def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def bucket_prob(forecast, t_low, t_high, sigma=None):
-    """For regular buckets — exact match. For edge buckets — normal distribution."""
+    """Probability the actual temp lands in the bucket given forecast f
+    with Gaussian error sigma. Point buckets (t_low==t_high) are rounding
+    windows: the bucket "21" really means [20.5, 21.5)."""
     s = sigma or 2.0
+    f = float(forecast)
     if t_low == -999:
-        return norm_cdf((t_high - float(forecast)) / s)
+        return norm_cdf((t_high - f) / s)
     if t_high == 999:
-        return 1.0 - norm_cdf((t_low - float(forecast)) / s)
-    return 1.0 if in_bucket(forecast, t_low, t_high) else 0.0
+        return 1.0 - norm_cdf((t_low - f) / s)
+    if t_low == t_high:
+        lo, hi = t_low - 0.5, t_high + 0.5
+    else:
+        lo, hi = t_low, t_high
+    return norm_cdf((hi - f) / s) - norm_cdf((lo - f) / s)
 
 def calc_ev(p, price):
     if price <= 0 or price >= 1: return 0.0
@@ -476,7 +517,9 @@ def get_sigma(city_slug, source="ecmwf", product_kind=DEFAULT_PRODUCT_KIND):
     key = f"{product_kind}_{city_slug}_{source}"
     if key in _cal:
         return _cal[key]["sigma"]
-    return SIGMA_F if LOCATIONS[city_slug]["unit"] == "F" else SIGMA_C
+    unit = LOCATIONS[city_slug]["unit"]
+    return (_sigma_cal.get(f"{source}_{unit}") or _sigma_cal.get(unit)
+            or _sigma_cal.get("global") or (SIGMA_F if unit == "F" else SIGMA_C))
 
 def run_calibration(markets):
     """Recalculates sigma from resolved markets."""
@@ -768,6 +811,18 @@ def load_all_markets():
             pass
     return markets
 
+def total_open_exposure():
+    """Sum of `cost` for all markets with an open position (global wallet exposure)."""
+    t = 0.0
+    for m in load_all_markets():
+        pos = m.get("position")
+        if pos and pos.get("status") == "open":
+            try:
+                t += float(pos.get("cost", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return round(t, 2)
+
 def new_market(city_slug, date_str, event, hours, product_kind=DEFAULT_PRODUCT_KIND):
     loc = LOCATIONS[city_slug]
     return {
@@ -859,7 +914,7 @@ def scan_and_update():
     for city_slug, loc in LOCATIONS.items():
         unit = loc["unit"]
         unit_sym = "F" if unit == "F" else "C"
-        print(f"  -> {loc['name']}...", end=" ", flush=True)
+        print(f"  -> {loc['name']}...")
         _trace_scan(f"{loc['name']} scan start")
 
         dates = [(now + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
@@ -1121,15 +1176,23 @@ def scan_and_update():
                             bid    = o.get("bid", o["price"])
                             ask    = o.get("ask", o["price"])
                             spread = o.get("spread", 0)
+                            no_edge_reason = None
 
-                            # All filters — if any fails, skip this market entirely
-                            if volume >= MIN_VOLUME:
+                            if volume < MIN_VOLUME:
+                                no_edge_reason = f"vol={int(volume)}"
+                            else:
                                 p  = bucket_prob(forecast_temp, t_low, t_high, sigma)
                                 ev = calc_ev(p, ask)
-                                if ev >= MIN_EV:
+                                if ev < MIN_EV:
+                                    no_edge_reason = f"ev={ev:+.2f}"
+                                else:
                                     kelly = calc_kelly(p, ask)
                                     size  = bet_size(kelly, balance)
-                                    if size >= 0.50:
+                                    remaining = max(0.0, MAX_TOTAL_EXPOSURE - total_open_exposure())
+                                    size = min(size, remaining)
+                                    if size < 0.50:
+                                        no_edge_reason = f"size=${size:.2f}"
+                                    else:
                                         best_signal = {
                                             "market_id":    o["market_id"],
                                             "question":     o["question"],
@@ -1154,6 +1217,10 @@ def scan_and_update():
                                             "close_reason": None,
                                             "closed_at":    None,
                                         }
+
+                            if no_edge_reason:
+                                bucket_label = f"{t_low}-{t_high}{unit_sym}"
+                                print(f"  [NO EDGE] {loc['name']} [{product_kind}] {date} — fc={forecast_temp}{unit_sym} {bucket_label} {no_edge_reason}")
 
                         if best_signal:
                             _trace_scan(f"[{loc['name']}] {product_kind} {date}: candidate bucket {best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}")
@@ -1185,6 +1252,21 @@ def scan_and_update():
                                 print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
 
                             if not skip_position and best_signal["entry_price"] < MAX_PRICE:
+                                remaining = max(0.0, MAX_TOTAL_EXPOSURE - total_open_exposure())
+                                if remaining < 0.50:
+                                    print(
+                                        f"  [SKIP] {loc['name']} [{product_kind}] {date} — "
+                                        f"max total exposure ${MAX_TOTAL_EXPOSURE:.2f} reached (${remaining:.2f} left)"
+                                    )
+                                    skip_position = True
+                                elif best_signal["cost"] > remaining + 0.0001:
+                                    best_signal["cost"] = round(remaining, 2)
+                                    best_signal["shares"] = round(
+                                        best_signal["cost"] / best_signal["entry_price"], 2
+                                    )
+                                if not skip_position and best_signal["cost"] < 0.50:
+                                    skip_position = True
+                            if not skip_position and best_signal["entry_price"] < MAX_PRICE:
                                 if LIVE_TRADING:
                                     result = place_live_buy(best_signal.get("token_id"), best_signal["entry_price"], best_signal["cost"])
                                     if not result:
@@ -1212,7 +1294,7 @@ def scan_and_update():
                     print(f"  [ERROR] {loc['name']} [{product_kind}] {date}: {e}")
 
         _trace_scan(f"{loc['name']} scan complete")
-        print("ok")
+        print("  ok")
 
     # --- AUTO-RESOLUTION ---
     open_markets = [
@@ -1529,21 +1611,23 @@ def run_loop():
     print(f"  WEATHERBET — STARTING")
     print(f"{'='*55}")
     print(f"  Cities:     {len(LOCATIONS)}")
-    print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
-    print(f"  Scan:       {SCAN_INTERVAL//60} min | Monitor: {MONITOR_INTERVAL//60} min")
+    print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET} | Max total exposure: ${MAX_TOTAL_EXPOSURE}")
+    print(f"  Scan:       {SCAN_INTERVAL_MIN//60}-{SCAN_INTERVAL_MAX//60} min | Monitor: {MONITOR_INTERVAL//60} min")
     print(f"  Sources:    ECMWF + HRRR(US) + METAR(D+0)")
     print(f"  Mode:       {'LIVE' if LIVE_TRADING else 'PAPER'}")
     print(f"  Data:       {DATA_DIR.resolve()}")
     print(f"  Ctrl+C to stop\n")
 
     last_full_scan = 0
+    next_full_scan_ts = 0
+    last_monitor_ts = 0
 
     while True:
         now_ts  = time.time()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Full scan once per hour
-        if now_ts - last_full_scan >= SCAN_INTERVAL:
+        # Full scan every randomized interval (see scan_interval_min / scan_interval_max).
+        if now_ts >= next_full_scan_ts:
             print(f"[{now_str}] full scan...")
             try:
                 new_pos, closed, resolved = scan_and_update()
@@ -1551,6 +1635,8 @@ def run_loop():
                 print(f"  balance: ${state['balance']:,.2f} | "
                       f"new: {new_pos} | closed: {closed} | resolved: {resolved}")
                 last_full_scan = time.time()
+                next_delay = random.randint(SCAN_INTERVAL_MIN, SCAN_INTERVAL_MAX)
+                next_full_scan_ts = last_full_scan + next_delay
             except KeyboardInterrupt:
                 print(f"\n  Stopping — saving state...")
                 save_state(load_state())
@@ -1558,13 +1644,15 @@ def run_loop():
                 break
             except requests.exceptions.ConnectionError:
                 print(f"  Connection lost — waiting 60 sec")
+                next_full_scan_ts = time.time() + 60
                 time.sleep(60)
                 continue
             except Exception as e:
                 print(f"  Error: {e} — waiting 60 sec")
+                next_full_scan_ts = time.time() + 60
                 time.sleep(60)
                 continue
-        else:
+        elif now_ts - last_monitor_ts >= MONITOR_INTERVAL:
             # Quick stop monitoring
             print(f"[{now_str}] monitoring positions...")
             try:
@@ -1572,11 +1660,15 @@ def run_loop():
                 if stopped:
                     state = load_state()
                     print(f"  balance: ${state['balance']:,.2f}")
+                last_monitor_ts = time.time()
             except Exception as e:
                 print(f"  Monitor error: {e}")
 
         try:
-            time.sleep(MONITOR_INTERVAL)
+            now_ts = time.time()
+            until_scan = max(1, int(next_full_scan_ts - now_ts)) if next_full_scan_ts > now_ts else 1
+            sleep_for = min(MONITOR_INTERVAL, until_scan)
+            time.sleep(max(1, sleep_for))
         except KeyboardInterrupt:
             print(f"\n  Stopping — saving state...")
             save_state(load_state())

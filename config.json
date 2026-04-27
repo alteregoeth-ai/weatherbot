@@ -8,7 +8,10 @@
   "max_hours": 72.0,
   "kelly_fraction": 0.25,
   "scan_interval": 3600,
+  "scan_interval_min": 60,
+  "scan_interval_max": 300,
   "calibration_min": 30,
   "vc_key": "YOUR_VISUAL_CROSSING_KEY",
-  "max_slippage": 0.03
+  "max_slippage": 0.03,
+  "max_total_exposure": 10.0
 }
