@@ -1001,7 +1001,7 @@ def scan_and_update():
                                     print(f"  [LIVE ERR] Stop close not recorded for {loc['name']} [{product_kind}] {date}")
 
                     # --- CLOSE POSITION if forecast shifted 2+ degrees ---
-                    if mkt.get("position") and forecast_temp is not None:
+                    if mkt.get("position") and mkt["position"].get("status") == "open" and forecast_temp is not None:
                         pos = mkt["position"]
                         old_bucket_low  = pos["bucket_low"]
                         old_bucket_high = pos["bucket_high"]
@@ -1246,7 +1246,7 @@ def scan_and_update():
         price  = pos["entry_price"]
         size   = pos["cost"]
         shares = pos["shares"]
-        pnl    = round(shares * (1 - price), 2) if won else round(-size, 2)
+        pnl    = round(shares - size, 2) if won else round(-size, 2)
 
         balance += size + pnl
         pos["exit_price"]   = 1.0 if won else 0.0
