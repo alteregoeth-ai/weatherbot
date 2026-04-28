@@ -1014,8 +1014,7 @@ def run_loop():
 # CLI
 # =============================================================================
 
-if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+def main(cmd: str):
     if cmd == "run":
         run_loop()
     elif cmd == "status":
@@ -1024,5 +1023,11 @@ if __name__ == "__main__":
     elif cmd == "report":
         _cal = load_cal()
         print_report()
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd in ["run", "status", "report"] :
+        main(cmd)
     else:
         print("Usage: python weatherbet.py [run|status|report]")
