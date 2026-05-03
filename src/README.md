@@ -62,10 +62,28 @@ Every Polymarket weather market resolves on a specific airport station. NYC reso
 ---
 
 ## Installation
+To run the package directly:
 ```bash
-git clone https://github.com/alteregoeth-ai/weatherbot
+git clone </>
 cd weatherbot
+python -m venv .venv
 pip install requests
+```
+
+When the package needs to be imported by a script
+```bash
+cd directory-of-script
+pip install weatherbet@git+</>
+```
+Create a script with:
+```python
+import bot_v1
+#or
+import bot_v2
+
+bot_v1.main("" | "--live" | "--reset" | "--positions")
+#or
+bot_v2.main("run" | "status" | "report")
 ```
 
 Create `config.json` in the project folder:
@@ -92,9 +110,9 @@ Get a free Visual Crossing API key at visualcrossing.com — used to fetch actua
 
 ## Usage
 ```bash
-python weatherbet.py           # start the bot — scans every hour
-python weatherbet.py status    # balance and open positions
-python weatherbet.py report    # full breakdown of all resolved markets
+python ./src/bot_v2.py           # start the bot — scans every hour
+python ./src/bot_v2.py status    # balance and open positions
+python ./src/bot_v2.py report    # full breakdown of all resolved markets
 ```
 
 ---
