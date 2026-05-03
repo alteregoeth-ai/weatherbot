@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "name": "WeatherBet: Bot v1",
+      "program": "${workspaceFolder}/src/bot_v1.py",
+      "args": ["${input:botV1Args}"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "name": "WeatherBet: Bot v2 (weatherbet.py)",
+      "program": "${workspaceFolder}/src/bot_v2.py",
+      "args": ["${input:botV2Args}"],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "type": "pickString",
+      "id": "botV1Args",
+      "description": "Run mode for bot_v1.py",
+      "options": ["", "--live", "--reset", "--positions"]
+    },
+    {
+      "type": "pickString",
+      "id": "botV2Args",
+      "description": "Run mode for bot_v2.py (weatherbet.py)",
+      "options": ["run", "status", "report"]
+    }
+  ]
+}

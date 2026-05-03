@@ -40,6 +40,7 @@ MAX_SLIPPAGE     = _cfg.get("max_slippage", 0.03)  # max allowed ask-bid spread
 SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
+KEEP_ALIVE       = _cfg.get("keep_alive", True)
 
 SIGMA_F = 2.0
 SIGMA_C = 1.2
@@ -1002,6 +1003,8 @@ def run_loop():
             except Exception as e:
                 print(f"  Monitor error: {e}")
 
+        if not KEEP_ALIVE: break
+
         try:
             time.sleep(MONITOR_INTERVAL)
         except KeyboardInterrupt:
@@ -1014,8 +1017,9 @@ def run_loop():
 # CLI
 # =============================================================================
 
-if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+def main(cmd: str):
+    global _cal
+    
     if cmd == "run":
         run_loop()
     elif cmd == "status":
@@ -1024,5 +1028,11 @@ if __name__ == "__main__":
     elif cmd == "report":
         _cal = load_cal()
         print_report()
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd in ["run", "status", "report"] :
+        main(cmd)
     else:
         print("Usage: python weatherbet.py [run|status|report]")
