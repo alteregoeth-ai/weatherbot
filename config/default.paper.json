@@ -1,0 +1,26 @@
+{
+  "mode": "paper",
+  "stage": "paper",
+  "trading": {
+    "max_bet": 1.0,
+    "min_edge": 0.15,
+    "max_spread": 0.02,
+    "min_liquidity_usd": 100.0
+  },
+  "risk": {
+    "max_daily_loss": 5.0,
+    "max_open_positions": 5,
+    "max_city_exposure": 3.0,
+    "max_event_exposure": 1.0
+  },
+  "execution": {
+    "enable_live": false,
+    "dry_run": true
+  },
+  "reporting": {
+    "telegram_enabled": false
+  },
+  "ledger": {
+    "path": "data/trades.jsonl"
+  }
+}

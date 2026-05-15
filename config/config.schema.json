@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Weatherbot Config",
+  "type": "object",
+  "required": ["mode", "stage", "trading", "risk", "execution"],
+  "properties": {
+    "mode": {"type": "string", "enum": ["paper", "live"]},
+    "stage": {"type": "string", "enum": ["paper", "stage_a", "stage_b"]},
+    "trading": {
+      "type": "object",
+      "required": ["max_bet", "min_edge", "max_spread"],
+      "properties": {
+        "max_bet": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_edge": {"type": "number", "minimum": 0.15, "maximum": 1},
+        "max_spread": {"type": "number", "minimum": 0, "maximum": 0.02},
+        "min_liquidity_usd": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "risk": {
+      "type": "object",
+      "required": ["max_daily_loss", "max_open_positions", "max_city_exposure", "max_event_exposure"],
+      "properties": {
+        "max_daily_loss": {"type": "number", "minimum": 0},
+        "max_open_positions": {"type": "integer", "minimum": 0},
+        "max_city_exposure": {"type": "number", "minimum": 0},
+        "max_event_exposure": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "required": ["enable_live"],
+      "properties": {
+        "enable_live": {"type": "boolean"},
+        "dry_run": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "reporting": {
+      "type": "object",
+      "properties": {"telegram_enabled": {"type": "boolean"}},
+      "additionalProperties": true
+    },
+    "ledger": {
+      "type": "object",
+      "properties": {"path": {"type": "string"}},
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
