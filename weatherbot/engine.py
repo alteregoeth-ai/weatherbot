@@ -103,6 +103,18 @@ class PaperTradingEngine:
             )
             return EngineResult(False, reasons, probability, edge, dollars, None)
 
+        if edge < self.risk_limits.min_edge:
+            reasons = ["min_edge"]
+            self._log_decision(
+                candidate,
+                probability=probability,
+                edge=edge,
+                dollars=dollars,
+                risk_approved=False,
+                risk_reasons=reasons,
+            )
+            return EngineResult(False, reasons, probability, edge, dollars, None)
+
         risk_candidate = TradeCandidate(
             decision_id=candidate.decision_id,
             market_id=candidate.market_id,
