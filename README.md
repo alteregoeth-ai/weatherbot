@@ -1,4 +1,4 @@
-# 🌤 WeatherBet — Polymarket Weather Trading Bot
+# 🌤 Weatherbot — Polymarket Weather Trading Bot
 
 Automated weather market trading bot for Polymarket. Finds mispriced temperature outcomes using real forecast data from multiple sources across 20 cities worldwide.
 
@@ -13,7 +13,7 @@ The foundation. Scans 6 US cities, fetches forecasts from NWS using airport stat
 
 No math, no complexity. Just the core logic — good for understanding how the system works.
 
-### `weatherbet.py` — Full Bot (current)
+### `weatherbot.py` — Full Bot (current)
 Everything in v1, plus:
 - **20 cities** across 4 continents (US, Europe, Asia, South America, Oceania)
 - **3 forecast sources** — ECMWF (global), HRRR/GFS (US, hourly), METAR (real-time observations)
@@ -92,9 +92,9 @@ Get a free Visual Crossing API key at visualcrossing.com — used to fetch actua
 
 ## Usage
 ```bash
-python weatherbet.py           # start the bot — scans every hour
-python weatherbet.py status    # balance and open positions
-python weatherbet.py report    # full breakdown of all resolved markets
+python weatherbot.py           # start the bot — scans every hour
+python weatherbot.py status    # balance and open positions
+python weatherbot.py report    # full breakdown of all resolved markets
 ```
 
 ---
@@ -119,6 +119,12 @@ This data is used for self-calibration — the bot learns forecast accuracy per 
 | Aviation Weather (METAR) | None | Real-time station observations |
 | Polymarket Gamma | None | Market data |
 | Visual Crossing | Free key | Historical temps for resolution |
+
+---
+
+## Contributors
+
+- Patrick Sebastine
 
 ---
 
