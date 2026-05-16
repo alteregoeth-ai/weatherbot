@@ -122,12 +122,6 @@ This data is used for self-calibration — the bot learns forecast accuracy per 
 
 ---
 
-## Contributors
-
-- Patrick Sebastine
-
----
-
 ## Disclaimer
 
 This is not financial advice. Prediction markets carry real risk. Run the simulation thoroughly before committing real capital.
