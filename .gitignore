@@ -36,6 +36,10 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Local bot state / paper ledgers
+/data/*.jsonl
+!/reports/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
