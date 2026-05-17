@@ -26,6 +26,11 @@ def test_paper_runner_defaults_to_safe_paper_config_and_loop_controls():
     assert "WEATHERBOT_LOOP_SECONDS" in content
     assert "WEATHERBOT_ONCE" in content
     assert "WEATHERBOT_COMMAND" in content
+    assert "nice -n 10" in content
+    assert "ionice -c2 -n7" in content
+    assert "flock" in content
+    assert "OPENBLAS_NUM_THREADS=1" in content
+    assert "weatherbot.scan_runner" not in content
 
 
 def test_live_stage_a_runner_requires_explicit_ack_and_never_embeds_secrets():

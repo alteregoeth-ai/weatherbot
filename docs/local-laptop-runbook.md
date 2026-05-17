@@ -42,11 +42,13 @@ The script exports:
 - `WEATHERBOT_ENABLE_LIVE=false`
 - `WEATHERBOT_CONFIG=config/default.paper.json` by default
 
-Until a dedicated scan runner is wired in, override the command explicitly:
+Until a dedicated live market scan runner is wired in, the default low-resource command runs the deterministic paper-trading demo and appends to `data/paper_trades.jsonl`. You can override the command explicitly:
 
 ```bash
-WEATHERBOT_COMMAND='python -m pytest -q' WEATHERBOT_ONCE=true scripts/run_paper.sh
+WEATHERBOT_COMMAND='python scripts/paper_trade.py --demo --ledger data/paper_trades.jsonl --bankroll 10 --no-telegram' WEATHERBOT_ONCE=true scripts/run_paper.sh
 ```
+
+The runner uses `flock`, `nice -n 10`, `ionice -c2 -n7`, and single-threaded BLAS environment variables so it avoids overlapping or parallel-heavy work.
 
 ## Live Stage A runner
 
